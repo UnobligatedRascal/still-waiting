@@ -4,7 +4,7 @@
 
 ---
 
-## Status: 2026-09-19
+## Status: 2026-09-20
 
 ### Completed
 - [x] PyTorch 2.4.0a0+sm_37 built from source on NOUGHT
@@ -13,6 +13,9 @@
 - [x] LoRA training pipeline validated on Qwen2.5-0.5B-Instruct
 - [x] Orchestrator running on port 9999 (all endpoints working)
 - [x] Project repo initialized and committed
+- [x] Full training loop implemented (transformers_backend.py)
+- [x] Browser-based GUI (React+Vite+Tailwind) served from orchestrator
+- [x] All code deployed to NOUGHT, orchestrator rebuilt with static serving
 
 ### Current Setup
 - PyTorch: editable install from `/home/whistler/pytorch-kepler`
@@ -58,12 +61,15 @@
 ## Next Steps
 
 ### High Priority
-- [ ] Implement full training loop in `transformers_backend.py`
-  - Replace dummy `train_step()` with actual dataset loading + optimizer step
-  - Add gradient accumulation (Kepler needs this for effective batch size)
-  - Manual gradient checkpointing (transformers' built-in may use unsupported ops)
-- [ ] Deploy python worker code to NOUGHT (`/home/whistler/still-waiting/python/`)
-- [ ] Test worker ↔ orchestrator IPC
+- [ ] Test worker ↔ orchestrator IPC (end-to-end training job)
+- [ ] Test with real dataset on NOUGHT
+
+### Medium Priority
+- [ ] Test distributed training (DDP) across GPUs 1,2,5,6 (user-run)
+- [ ] Build TUI (ratatui) for SSH monitoring
+- [ ] Implement conductor logic skeleton
+- [ ] Storage layout for checkpoints (`/data/checkpoints/` — verify space)
+- [ ] Fix nought-ssh extension credentials (extension cached old password)
 
 ### Medium Priority
 - [ ] Test distributed training (DDP) across GPUs 1,2,5,6 (user-run)

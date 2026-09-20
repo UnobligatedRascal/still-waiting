@@ -1,53 +1,64 @@
 # still-waiting GUI
 
-Control panel for NOUGHT training operations. Built with Tauri (Rust backend) + SvelteKit (frontend).
+Browser-based control panel for NOUGHT training operations. Served directly from the orchestrator at `http://NOUGHT:9999/`.
+
+Built with React + Vite + TailwindCSS.
 
 ## Architecture
 
 ```
-┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
-│  GUI Client     │ HTTP   │  NOUGHT         │ SSH    │  Admin/Dev      │
-│  (Tauri +       │ ◄────► │  orchestrator   │ ◄────► │  (TUI / direct) │
-│   SvelteKit)    │ WS     │  (:8000)        │        │                 │
-└─────────────────┘        └─────────────────┘        └─────────────────┘
+┌─────────────────┐ HTTP+WS   ┌──────────────────┐        ┌─────────────────┐
+│  Your Browser   │ ────────► │  orchestrator    │ ───────│  Python workers │
+│  (:9999/)       │           │  (:9999/v1/api)  │        │  (Kepler GPUs)  │
+└─────────────────┘           └──────────────────┘        └─────────────────┘
 ```
 
-## Setup
+- GUI served as static files from `/` (SPA with fallback routing)
+- API at `/v1/` — OpenAI-compatible training endpoints
+- Single deployment: one orchestrator binary serves everything
+
+## Development
 
 ### Prerequisites
 - Node.js 20+
-- Rust (for Tauri)
-- System deps (Windows): Windows SDK, WebView2 runtime
+- npm
 
-### Install
+### Install & run locally
 ```bash
 cd gui
 npm install
-npm run tauri dev
+npm run dev
 ```
 
-### Connect to NOUGHT
-Set the orchestrator URL in `.env`:
+Dev server proxies `/v1` requests to NOUGHT at `http://192.168.137.29:9999`.
+
+### Build for deployment
+```bash
+npm run build
+# Output: gui/dist/ — copy to NOUGHT /home/whistler/still-waiting/gui/dist/
 ```
-VITE_ORCH_URL=http://192.168.137.29:8000
+
+## Features
+
+- **Dashboard**: Live status of all training jobs (auto-refresh every 5s)
+- **Job creation**: Model selection, target steps, dataset path
+- **Job detail**: Checkpoint history with loss metrics, pause/resume controls
+- **Status banner**: Running/queued/failed job counts at a glance
+
+## Deployment
+
+Build output is served by orchestrator. Configure with:
+```bash
+ORCH_STATIC_DIR=/home/whistler/still-waiting/gui/dist ./agent-orchestrator
 ```
 
-Or configure at runtime in settings.
+## Why browser-based (not Tauri)?
 
-## Features (planned)
-
-- Job dashboard: live status of all training jobs
-- Job creation wizard: model selection, LoRA config, dataset upload
-- Checkpoint browser: view metrics, compare checkpoints
-- Conductor panel: apply surgical edits, inject preferences
-- GPU monitoring: VRAM, utilization per GPU (via nvidia-smi polling)
-- Model library: list trained/exported models
-
-## Notes
-
-- GUI connects over network; NOUGHT runs headless
-- WebSocket for real-time job status updates
-- Tauri keeps the binary small (~5MB) vs Electron (~150MB)
+NOUGHT is headless on LAN — the GUI always runs remotely anyway. Browser gives:
+- Zero install friction — open browser, go
+- Accessible from any device on LAN (laptop, tablet, phone)
+- Simpler deployment — no native builds, no per-platform packaging
+- Same origin as API — no CORS configuration needed
 
 ---
-UnobligatedRascal
+Built by UnobligatedRascal — Ancient hardware, fresh ambition.
