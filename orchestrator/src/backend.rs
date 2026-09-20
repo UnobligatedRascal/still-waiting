@@ -47,8 +47,8 @@ pub trait WorkerClient: Send + Sync {
     async fn kill_job(&self, job_id: &str) -> Result<()>;
 }
 
-/// TODO: Implement concrete WorkerClient that manages Python worker processes.
-/// Options:
-/// - HTTP client to a worker REST API
-/// - Direct subprocess management with std::process::Command
-/// - Shared filesystem with sentinel files
+// TODO: Implement concrete WorkerClient that manages Python worker processes.
+// Options:
+// - HTTP client to a worker REST API
+// - Direct subprocess management with std::process::Command
+// - Shared filesystem with sentinel files

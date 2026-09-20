@@ -15,7 +15,7 @@ use uuid::Uuid;
 /// - If stagnating → recommend hyperparameter change
 /// - Human-in-the-loop: mark suspicious checkpoints for review
 pub async fn evaluate_and_maybe_edit(
-    state: &AppState,
+    _state: &AppState,
     job_id: Uuid,
     latest_ckpt: &CheckpointMeta,
 ) -> Result<Option<String>> {

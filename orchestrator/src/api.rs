@@ -32,7 +32,7 @@ pub struct ConductorFeedback {
     pub instruction: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize)]
 pub struct CheckpointRequest {
     pub metrics: serde_json::Value,
     pub path: String,
@@ -167,6 +167,7 @@ async fn report_checkpoint(
 
     let mut jobs = state.jobs.write().await;
     if let Some(job) = jobs.get_mut(&job_id) {
+        let path_clone = req.path.clone();
         let ckpt = CheckpointMeta {
             id: Uuid::new_v4(),
             step: req.step,
@@ -180,7 +181,7 @@ async fn report_checkpoint(
         job.updated_at = chrono::Utc::now();
 
         // Run conductor evaluation
-        drop(jobs); // release lock for conductor
+        drop(jobs);
         if let Ok(Some(instruction)) = conductor::evaluate_and_maybe_edit(&state, job_id, &ckpt).await {
             conductor::apply_surgical_edit(&state, job_id, &instruction).await.ok();
         }
@@ -188,7 +189,7 @@ async fn report_checkpoint(
         tracing::info!(
             job_id = %job_id,
             step = req.step,
-            ckpt_path = %req.path,
+            ckpt_path = %path_clone,
             "Checkpoint reported",
         );
         Ok(StatusCode::OK)
