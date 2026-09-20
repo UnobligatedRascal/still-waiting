@@ -48,14 +48,16 @@
 - [x] Test CUDA compute on Kepler with PyTorch 2.4
 - [x] Install transformers/PEFT stack
 - [x] Validate LoRA training pipeline
-- [ ] Deploy python worker code to NOUGHT
-- [ ] Implement full training loop in transformers_backend.py
+- [x] Deploy python worker code to NOUGHT
+- [x] Implement full training loop in transformers_backend.py
+- [x] Build browser-based GUI (React+Vite+Tailwind)
+- [ ] Test worker ↔ orchestrator IPC (end-to-end training job)
 - [ ] Test distributed training across 8 GPUs
 - [ ] Build TUI (ratatui) for SSH access
-- [ ] Design GUI wireframes
 - [ ] Implement GGUF export pipeline
 - [ ] Storage management (512GB is tight!)
 - [ ] Conductor logic skeleton
+- [ ] Fix nought-ssh extension (cached old password, needs restart)
 - [ ] Implement Python worker's training loop
 - [ ] Build basic TUI (ratatui) for SSH access
 - [ ] Design GUI wireframes
