@@ -2,6 +2,19 @@
 
 > UnobligatedRascal private notes. Technical decisions, lessons learned, next steps.
 
+## Mascot & Branding
+
+**Mascot**: Sonic the Hedgehog in his classic "still waiting" pose — arms crossed, foot tapping.
+- Source: Sonic the Hedgehog (1991) Title Screen idle animation
+- Meaning: Training on Kepler is slow; Sonic is waiting for it to finish
+- Placement: Empty state (no jobs), loading spinners, possibly subtle background element
+- Implementation: Sprite sheet or simple CSS animation (keep it lightweight)
+
+**Brand color**: Kepler orange `#e8491d` + Sonic blue accent `#00a8ff`
+- Primary actions: Kepler orange
+- Highlights/links: Sonic blue
+- Subtle Sonic silhouette or speed lines as decorative elements
+
 ## Hardware Facts (NOUGHT)
 
 - **CPUs**: 2x Xeon E5-2697v4 (36 cores each, Broadwell), NUMA0 + NUMA1
@@ -116,12 +129,118 @@ numactl --cpunodebind=0 --membind=0 \
 
 ### Next Session Priorities
 
-1. **End-to-end test**: Create job via API/GUI, manually launch worker, verify training loop
-2. **Worker auto-spawn**: Orchestrator should launch workers as subprocesses (currently manual)
-3. **Worker IPC**: Implement proper heartbeats and job state sync
-4. **Distributed training test**: torchrun across GPUs 1,2,5,6 (user-run)
-5. **TUI**: Ratatui for SSH monitoring
-6. **Conductor**: Implement median-arc evaluation logic
+1. **UI refinement (primary focus)** — Unsloth-level comfort, detailed plan below
+2. **End-to-end test**: Create job via API/GUI, manually launch worker, verify training loop
+3. **Worker auto-spawn**: Orchestrator should launch workers as subprocesses
+4. **Worker IPC**: Proper heartbeats and job state sync
+5. **Distributed training test**: torchrun across GPUs 1,2,5,6
+6. **TUI**: Ratatui for SSH monitoring
+7. **Conductor**: Implement median-arc evaluation logic
+
+---
+
+## UI Refinement Plan — "Unsloth-Level Comfort"
+
+**Goal**: Match Unsloth Desktop/Studio's training UX comfort while keeping stack lean (React 18 + Vite + Tailwind only).
+**Research**: Unsloth Studio features include no-code training, live observability (loss/gradient/GPU), data recipes, export workflows, training history.
+**Decision**: Stay SPA, single-binary deploy. Add lightweight libs only where they save significant dev time.
+
+### Library Decisions
+
+| Need | Choice | Rationale |
+|------|--------|-----------|
+| Charts | `lightweight-charts` (TradingView) | ~40KB gzipped, GPU-accelerated canvas, perfect for live loss curves. Recharts is heavier (~150KB). |
+| Combobox | Pure React + Tailwind | Model picker is simple enough; avoids headless-ui dependency. |
+| Icons | Inline SVG or `lucide-react` | Minimal, no font overhead. |
+| Form state | Local React state only | No form library needed for this complexity. |
+
+### Implementation Phases (ordered by impact/effort)
+
+#### Phase 1: Job Creation Comfort
+
+**Components**: `JobForm` rewrite → `QuickJobForm` + `AdvancedSettings`
+
+- **Progressive disclosure**:
+  - Default strip: Model picker + Dataset path + "Start with defaults" button
+  - Expandable "Advanced" toggle: LoRA rank/α, seq length, batch/accum, LR, target modules
+  - Pre-filled Kepler-safe defaults (F32, seq_len=512, batch=2, accum=8)
+- **Model picker** (replaces plain text input):
+  - Searchable combobox with HF-style fuzzy match
+  - Pre-listed safe models: `Qwen/Qwen2.5-0.5B-Instruct`, `TinyLlama/TinyLlama-1.1B`, etc.
+  - Badges: "fits partial GPUs", "needs full K80", "will OOM" based on known model sizes
+  - Optional VRAM probe: hit `/v1/system/status`, filter models by available GPU memory
+- **Live VRAM estimate**:
+  - Calculate approx VRAM needed: model_size + optimizer_states(2x) + batch_buffer
+  - Show badge: "~2.1GB needed — safe on partial GPUs ✓" or "~14GB needed — requires full GPU"
+- **Presets/recipes**:
+  - JSON presets loaded into form: "Quick Test", "Kepler Safe", "Full GPU", "Conversational"
+
+**Effort**: Low. Pure frontend, no backend changes.
+
+#### Phase 2: Live Metrics & Job Detail
+
+**Components**: `JobDetail` expansion + `LossChart`
+
+- **Loss sparkline/mini-chart**:
+  - `lightweight-charts` AreaChart rendering checkpoint metrics array
+  - Auto-scrolls as new checkpoints arrive
+  - Tooltip on hover: step, loss, timestamp
+- **Job progress bar**:
+  - Visual: current_step / target_steps with %
+  - ETA estimate: (target_steps - current) / (steps_per_second)
+- **Checkpoint timeline** (unique to our stack — lean into it):
+  - Table/list of checkpoints with: step, loss, timestamp
+  - Actions: "Resume from here", "Snip to this" (conductor commands)
+  - Click to view in detail panel
+- **Conductor surface**:
+  - Text area + structured buttons: "Adjust LR", "Snip to checkpoint", "Inject preference"
+  - Makes human-in-the-loop first-class, not hidden behind API calls
+
+**Effort**: Low-Med. `lightweight-charts` integration is straightforward.
+
+#### Phase 3: Real-time Logs
+
+**Components**: `LogPane` (collapsible)
+
+- **Streaming logs**:
+  - Backend: Add `/v1/training/jobs/:id/logs` endpoint (SSE or polled JSON)
+  - Worker: Stream training logs to file or memory buffer
+  - Frontend: Tail-like view, auto-scroll, filter by level
+  - Start with polling (every 2s) to avoid WebSocket complexity
+- **Visual polish**:
+  - Color-coded log levels (INFO green, WARN yellow, ERROR red)
+  - Timestamps, step numbers highlighted
+
+**Effort**: Med. Requires backend endpoint + worker log streaming.
+
+#### Phase 4: Visual Polish (low cost, high impact)
+
+- **Status pills**: Icons + consistent styling (running=green pulse, paused=orange, etc.)
+- **Skeleton loaders**: Shimmer effect while fetching jobs/status
+- **Empty states**: Better messaging when no jobs, no checkpoints, etc.
+- **Contrast tweaks**: Tighten dark theme, consistent Kepler accent (#e8491d)
+- **Mobile-friendly**: Ensure all panels work on smaller viewports
+
+**Effort**: Low. Pure CSS/Tailwind.
+
+#### Phase 5: Backend Extensions (when needed)
+
+- **Job logs endpoint**: `/v1/training/jobs/:id/logs` (SSE or JSON array)
+- **VRAM probe**: Enhance `/v1/system/status` with per-GPU free memory
+- **Export trigger**: `/v1/training/jobs/:id/export?fmt=gguf` (calls existing export)
+- **Dataset preview**: `/v1/datasets/preview?path=...` returns sample rows
+
+**Effort**: Low-Med. Small Rust endpoints.
+
+### Decision Log
+
+- **No heavy chart lib**: Lightweight-charts over Recharts/Visx for performance on slow hardware.
+- **No router**: Single-page SPA works; hash-based routing only if multiple "pages" needed later.
+- **No WebSocket initially**: Polling is simpler and sufficient for 5s refresh cadence.
+- **No dataset recipes yet**: Unique Unsloth feature but requires significant backend work; phase 2+.
+- **Preserve single-binary deploy**: All frontend served from orchestrator; no separate static server.
+
+---
 
 ## "In-a-Billion Shots" — Concrete Targets
 
