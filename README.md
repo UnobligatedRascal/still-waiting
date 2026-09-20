@@ -5,7 +5,7 @@
 
 Turn NOUGHT (Xeon E5-2697v4 + 128GB ECC + 8x Tesla K80 Kepler) into a lean, private LLM training rig — despite 13-year-old hardware and total ecosystem abandonment.
 
-**Access**: http://192.168.137.29:9999/ (when orchestrator is running)
+**Access**: `http://<YOUR_NOUGHT_IP>:9999/` (when orchestrator is running)
 
 ---
 
@@ -31,7 +31,7 @@ sudo systemctl start still-waiting-orchestrator
 
 ### From your browser
 
-Point to: **http://192.168.137.29:9999/**
+Point to: **`http://<YOUR_NOUGHT_IP>:9999/`**
 
 Create a training job with:
 - Model: `Qwen/Qwen2.5-0.5B-Instruct` (safe for partial GPUs)
@@ -61,7 +61,7 @@ numactl --cpunodebind=0 --membind=0 \
 
 ```
 ┌─────────────────────┐     ┌─────────────────────────────────────────────┐
-│   Your Browser      │     │              NOUGHT (192.168.137.29)         │
+│   Your Browser      │     │              NOUGHT (<YOUR_IP>)         │
 │                     │     │                                             │
 │  GUI (SPA at /)     │◄────│── agent-orchestrator (:9999)               │
 │  - Job dashboard    │ HTTP│  - API at /v1/                             │

@@ -10,9 +10,9 @@
 - **Topology**: NUMA0 → GPU 0-3; NUMA1 → GPU 4-7 (PIX-linked pairs)
 - **CUDA**: Driver 470.256.02, CUDA 11.8 toolkit
 - **Storage**: 256GB OS NVMe + 512GB DATA NVMe (TIGHT for training)
-- **Network**: 192.168.137.29, accessible from Windows workstation
-- **User**: whistler, PW updated 2026-09-20: `T0I$YQ161913`
-- **SSH**: Password auth works; nought-ssh extension cached old credentials (needs restart)
+- **Network**: `<NOUGHT_IP>` (e.g. 192.168.137.29), accessible from workstation
+- **User**: whistler (password stored separately, update nought.config.json if changed)
+- **SSH**: Password auth works
 
 ## Key Learnings from llama_wukong
 
@@ -84,8 +84,8 @@ Browser (:9999/) → orchestrator (Rust, :9999) → Python workers → Kepler GP
 ### Current State
 
 - Orchestrator: RUNNING (PID via `pgrep -f agent-orchestrator`)
-- GUI: http://192.168.137.29:9999/ (accessible from LAN)
-- API: http://192.168.137.29:9999/v1/ (all endpoints functional)
+- GUI: `http://<NOUGHT_IP>:9999/`
+- API: `http://<NOUGHT_IP>:9999/v1/`
 - Python backend: deployed but NOT auto-integrated with orchestrator yet
 - Workers: must be started manually per job
 

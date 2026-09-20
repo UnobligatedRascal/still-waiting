@@ -94,8 +94,9 @@ start_background() {
     sleep 2
     if kill -0 "$new_pid" 2>/dev/null; then
         info "Orchestrator started (PID $new_pid)"
-        info "GUI: http://192.168.137.29:9999/"
-        info "API: http://192.168.137.29:9999/v1/"
+        local ip=$(hostname -I | awk '{print $1}')
+        info "GUI: http://${ip}:9999/"
+        info "API: http://${ip}:9999/v1/"
         info "Logs: $LOG_DIR/orchestrator.log"
     else
         error "Orchestrator failed to start. Check logs: $LOG_DIR/orchestrator.log"

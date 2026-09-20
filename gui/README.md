@@ -30,7 +30,7 @@ npm install
 npm run dev
 ```
 
-Dev server proxies `/v1` requests to NOUGHT at `http://192.168.137.29:9999`.
+Dev server proxies `/v1` requests to NOUGHT (set `VITE_PROXY_TARGET=http://<ip>:9999`).
 
 ### Build for deployment
 ```bash

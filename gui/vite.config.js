@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/v1': 'http://192.168.137.29:9999',
+      '/v1': process.env.VITE_PROXY_TARGET || 'http://localhost:9999',
     },
   },
   build: {
