@@ -32,12 +32,12 @@ async fn main() {
 
     let state = AppState::new();
 
-    // API routes under /v1
+    // API routes (already prefixed with /v1)
     let api_router = api::routes(state.clone());
 
     // Static file serving with SPA fallback
     let app = axum::Router::new()
-        .nest("/v1", api_router)
+        .merge(api_router)
         .route("/", get(spa_fallback))
         .fallback_service(
             ServeDir::new(&static_dir)
