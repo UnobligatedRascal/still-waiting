@@ -127,15 +127,26 @@ numactl --cpunodebind=0 --membind=0 \
 
 **Deployment note**: base64 pipe upload fails silently for files >50KB; use SFTP `fastPut` instead.
 
+### UI Refinement Status (2026-09-21)
+
+- ✅ **Phase 1: Job Creation Comfort** — Model picker, presets, VRAM estimates, progressive disclosure
+- ✅ **Phase 2: Live Metrics** — Loss chart (lightweight-charts), enhanced checkpoint timeline
+- ⬜ **Phase 3: Real-time Logs** — Requires backend endpoint `/v1/training/jobs/:id/logs`
+- ✅ **Phase 4: Visual Polish** — Status pills, skeleton loaders, GPU free memory, empty states
+- ⬜ **Phase 5: Backend Extensions** — Logs endpoint, VRAM probe enhancement, dataset preview
+
+Bundle: ~107KB gzipped (lightweight-charts adds ~53KB, worth it for professional loss curves).
+
 ### Next Session Priorities
 
-1. **UI refinement (primary focus)** — Unsloth-level comfort, detailed plan below
-2. **End-to-end test**: Create job via API/GUI, manually launch worker, verify training loop
-3. **Worker auto-spawn**: Orchestrator should launch workers as subprocesses
-4. **Worker IPC**: Proper heartbeats and job state sync
-5. **Distributed training test**: torchrun across GPUs 1,2,5,6
-6. **TUI**: Ratatui for SSH monitoring
-7. **Conductor**: Implement median-arc evaluation logic
+1. **Phase 3: Real-time logs** — Backend endpoint + worker streaming
+2. **End-to-end test**: Create job via GUI, manually launch worker, verify training loop
+3. **Worker auto-spawn**: Orchestrator launches workers as subprocesses
+4. **Worker IPC**: Heartbeats and job state sync
+5. **Phase 5: Backend extensions** — Logs endpoint, dataset preview
+6. **Distributed training test**: torchrun across GPUs 1,2,5,6
+7. **TUI**: Ratatui for SSH monitoring
+8. **Conductor**: Implement median-arc evaluation logic
 
 ---
 
