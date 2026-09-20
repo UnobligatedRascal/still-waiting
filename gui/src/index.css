@@ -3,15 +3,17 @@
 @tailwind utilities;
 
 body {
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', 'Menlo', monospace;
+  background-color: #0a0a0f;
 }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #111;
+  background: #111118;
 }
 ::-webkit-scrollbar-thumb {
   background: #333;
@@ -19,4 +21,62 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #e8491d;
+}
+
+/* Smooth transitions */
+* {
+  transition-property: background-color, border-color, color, opacity;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+/* Focus ring */
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible {
+  outline: 1px solid #e8491d;
+  outline-offset: 1px;
+}
+
+/* Pulse animation for running indicators */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 4px rgba(74, 222, 128, 0.5);
+  }
+  50% {
+    opacity: 0.6;
+    box-shadow: 0 0 8px rgba(74, 222, 128, 0.8);
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Shimmer effect for skeleton loaders */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    #1f1f2e 0%,
+    #2a2a3e 50%,
+    #1f1f2e 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* Status pill pulse for running jobs */
+.running-indicator {
+  animation: pulse-glow 1.5s ease-in-out infinite;
 }
