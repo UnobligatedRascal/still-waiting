@@ -1,0 +1,37 @@
+# Python worker requirements for still-waiting training rig
+# Target: NOUGHT (Kepler sm_37, CUDA 11.8)
+# Built by UnobligatedRascal — Making old hardware sing.
+
+# NOTE: PyTorch is built from source (2.4.0-rc8 with sm_37 support).
+# Build instructions in README.md. Do NOT install pip wheel — no Kepler support.
+#
+# After building pytorch-kepler, create venv and install:
+#   python3 -m venv venv311
+#   source venv311/bin/activate
+#   cd pytorch-kepler && pip install -e .
+#   pip install -r requirements.txt
+
+# Core: PyTorch installed via editable from pytorch-kepler source
+# torch==2.4.0a0+gite4ee3be (editable install)
+
+# Transformers + training
+torchvision==0.19.0
+torchaudio==2.4.0
+transformers==4.40.0
+peft==0.7.0
+accelerate==0.25.0
+datasets==2.16.0
+# trl==0.7.0    # RLHF utilities (optional, add when needed)
+
+# Utilities
+requests>=2.31.0
+numpy>=1.24.3
+sentencepiece>=0.1.99
+protobuf>=4.23.0
+
+# Logging + monitoring
+tensorboard>=2.14.0
+
+# Optional: for GGUF export after training
+# safetensors==0.4.0
+# llama-cpp-python (manual build for Kepler)

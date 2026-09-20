@@ -1,0 +1,23 @@
+[Unit]
+Description=still-waiting Agent Orchestrator
+After=network.target
+
+[Service]
+Type=simple
+User=whistler
+WorkingDirectory=/home/whistler/still-waiting
+ExecStart=/home/whistler/still-waiting/orchestrator/target/release/agent-orchestrator
+Restart=on-failure
+RestartSec=10
+
+# Environment
+Environment=ORCH_BIND_ADDR=0.0.0.0
+Environment=ORCH_BIND_PORT=8000
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=still-waiting-orch
+
+[Install]
+WantedBy=multi-user.target
