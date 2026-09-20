@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import JobsTable from './components/JobsTable'
 import JobForm from './components/JobForm'
 import StatusBanner from './components/StatusBanner'
+import SystemStatus from './components/SystemStatus'
 
 const ORCH_URL = import.meta.env.VITE_ORCH_URL || '/v1'
 
@@ -104,6 +105,8 @@ export default function App() {
             onSelect={setSelectedJob}
           />
         )}
+
+        <SystemStatus />
       </main>
 
       {/* Job detail panel */}

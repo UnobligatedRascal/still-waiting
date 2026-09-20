@@ -1,223 +1,315 @@
- # STILL WAITING — Private Model Training on Ancient Hardware
+# STILL WAITING — Private Model Training on Ancient Hardware
 
- > "We don't settle for right. We make people forget what boxes even were."
- > — UnobligatedRascal
+> "We don't settle for right. We make people forget what boxes even were."
+> — UnobligatedRascal
 
- ## Purpose
+Turn NOUGHT (Xeon E5-2697v4 + 128GB ECC + 8x Tesla K80 Kepler) into a lean, private LLM training rig — despite 13-year-old hardware and total ecosystem abandonment.
 
- Turn NOUGHT (Xeon E5-2697v4 + 128GB ECC + 8x Tesla K80 Kepler) into a lean, mean, private LLM training
- rig despite:
- - Hardware age (Broadwell CPUs, 13-year-old Kepler GPUs)
- - Total software ecosystem abandonment of Kepler
- - Headless operation over SSH/LAN/Internet
+**Access**: http://192.168.137.29:9999/ (when orchestrator is running)
 
- **Philosophy**: We've already revived llama.cpp on this hardware with custom matmul pipelines and
- NUMA-aware tensor splitting that doubled performance. We're applying the same playbook to training.
- Whatever a "production team" wouldn't do — patching modern frameworks, building from source for
- deprecated architectures, spending weeks on "one-in-a-billion" optimizations — we do without
- hesitation.
+---
 
- ## Architecture
+## Quick Start
 
- ```
- ┌─────────────────────┐     ┌─────────────────────────────────────────────┐
- │   Your Workstation  │     │              NOUGHT (192.168.137.29)         │
- │                     │     │                                             │
- │  ┌──────────────┐   │     │  ┌────────────────────────────────────────┐ │
- │  │ GUI Client   │◄──┼─────┼──│ agent-orchestrator (Rust, :9999)      │ │
- │  │ (Tauri/Svelte)│   │ HTTP│  │ - OpenAI-compatible API               │ │
- │  └──────────────┘   │ WS  │  │ - Job/Checkpoint registry             │ │
- │                     │     │  │ - Conductor (surgical edit logic)     │ │
- │  ┌──────────────┐   │     │  └──────────────┬───────────────────────┘ │
- │  │ TUI Client   │◀──┼─────┼─────────────────┼───────────────────────── │
- │  │ (Ratatui)    │   │ SSH │                │                           │
- │  └──────────────┘   │     │  ┌─────────────┴───────────────────────┐   │
- │                     │─────│──│ Python Training Workers             │   │
- │                     │─────│──│ - Transformers/PEFT LoRA (Kepler)   │   │
- │                     │     │  └─────────────────────────────────────┘   │
- └─────────────────────┘     └─────────────────────────────────────────────┘
- ```
+### On NOUGHT (first time)
 
- ## Hardware Reality Check — NOUGHT
+```bash
+# 1. Activate environment
+source ~/.cargo/env
 
- | Component | Spec | Implications |
- |-----------|------|--------------|
- | CPU | 2x Xeon E5-2697v4 (36 cores each, 72 total) | Dual NUMA: NUMA0→GPU0-3, NUMA1→GPU4-7 |
- | RAM | 128GB DDR4 ECC (64GB per NUMA domain) | Plenty for LoRA up to 13B params |
- | GPU | 8x Tesla K80 GK210 Kepler (~11.5GB each, sm_3.7) | ANCIENT. No tensor cores. CUDA 11.8 toolkit.
- |
- | Storage | 225GB root NVMe (~84GB free) | TIGHT. Compress checkpoints. |
- | Network | LAN/WAN | GUI over HTTP+WebSocket; SSH for TUI |
+# 2. Build orchestrator (if not already built)
+cd /home/whistler/still-waiting/orchestrator
+cargo build --release
 
-### Current State
-- Production llama_wukong running (using ~8-9GB per GPU)
-- ~1-2GB free per GPU for training experiments
-- Python 3.11.2, Rust 1.98.1 installed
-- PyTorch 2.4.0a0+sm_37 built from source and working
-- transformers 4.40.0 + peft 0.7.0 installed
-- LoRA training validated on Qwen2.5-0.5B-Instruct
+# 3. Install systemd service (optional but recommended)
+sudo ./deploy/start_still_waiting.sh install-service
+sudo systemctl start still-waiting-orchestrator
 
- ## Proven: What Works on Kepler sm_37 (from llama_wukong)
+# OR run directly:
+./deploy/start_still_waiting.sh start
+```
 
- We've already fought these battles. Here's what we know works:
+### From your browser
 
- ### cuBLAS
- - **Legacy APIs only**: `cublasSgemm`, `cublasSgemmStridedBatched`, `cublasSgemmBatched` work
- - **Ex APIs crash**: `cublasGemmEx`, `cublasGemmStridedBatchedEx` → `CUBLAS_STATUS_ARCH_MISMATCH`
- - **No tensor ops**: `CUBLAS_DEFAULT_MATH`, not `CUBLAS_TF32_TENSOR_OP_MATH`
+Point to: **http://192.168.137.29:9999/**
 
- ### Flash Attention
- - **Tile/vector kernels work** on sm_37 (no tensor cores needed, just slower)
- - Supported head sizes: 40, 64, 72, 80, 96, 112, 128, 192, 256, 320, 512, 576
- - Source: `llama_wukong/ggml-cuda/fattn.cu` — portable to PyTorch if needed
+Create a training job with:
+- Model: `Qwen/Qwen2.5-0.5B-Instruct` (safe for partial GPUs)
+- Target steps: `1000`
+- Dataset path: optional JSONL file path
 
- ### Optimizer
- - **AdamW GPU kernel proven**: `llama_wukong/ggml-cuda/opt-step-adamw.cu` runs on Kepler
- - GPU-side optimizer saves PCIe bandwidth vs CPU fallback
+### Run a training worker (manually)
 
- ### Distributed Training
- - **NCCL works** across 8 GPUs with tensor splitting
- - **NUMA replication = 2.5x speedup**: Pin workers to NUMA domains with `numactl --cpunodebind=X
- --membind=X`
- - NUMA0 = GPU 0-3, NUMA1 = GPU 4-7 (PIX-linked pairs)
+```bash
+# Activate Python environment
+source /home/whistler/venv311/bin/activate
 
- ### Quantization
- - **MMQ (quantized matmul) works**: Kepler's DP4A instructions handle integer matmul
- - **TurboQuant KV cache**: 2.5-4.25 bpw compression proven in inference; applicable to training caches
+# Single GPU (e.g., GPU 1)
+numactl --cpunodebind=0 --membind=0 \
+  CUDA_VISIBLE_DEVICES=1 \
+  python3 /home/whistler/still-waiting/python/worker.py <job_id> <config.json>
 
- ## PyTorch: Building for the "Impossible"
+# Multiple GPUs (DDP, NUMA0)
+numactl --cpunodebind=0 --membind=0 \
+  torchrun --nproc_per_node=2 \
+  python3 /home/whistler/still-waiting/python/worker.py <job_id> <config.json>
+```
 
- Official PyTorch 2.0+ dropped Kepler support. We're building 2.4.0-rc8 from source with sm_37
- re-enabled.
+---
 
- ### Build Command (PROVEN WORKING)
- ```bash
- cd /home/whistler/pytorch-kepler && \
- export CMAKE_ARGS="-DCMAKE_C_COMPILER=/usr/bin/gcc-11 -DCMAKE_CXX_COMPILER=/usr/bin/g++-11
- -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-11" && \
- export PATH=/usr/local/cuda-11.8/bin:$PATH && \
- export LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:$LD_LIBRARY_PATH && \
- export TORCH_CUDA_ARCH_LIST="3.7" && \
- export MAX_JOBS=36 && \
- export USE_CUDA=1 && \
- export CUDA_HOME=/usr/local/cuda-11.8 && \
- export NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++-11" && \
- export CUDAFLAGS="-ccbin /usr/bin/g++-11" && \
- export CUDAHOSTCXX=/usr/bin/g++-11 && \
- export CXX=/usr/bin/g++-11 && \
- export CC=/usr/bin/gcc-11 && \
- python3 setup.py develop
- ```
+## Architecture
 
- ### Alternative: Prebuilt Wheel (xiaoran007)
- - PyTorch 2.4.0-rc8 wheel for sm_35/sm_37 available at https://github.com/xiaoran007/Pytorch-for-Kepler
- - Built for Python 3.9 only; requires separate Python install
+```
+┌─────────────────────┐     ┌─────────────────────────────────────────────┐
+│   Your Browser      │     │              NOUGHT (192.168.137.29)         │
+│                     │     │                                             │
+│  GUI (SPA at /)     │◄────│── agent-orchestrator (:9999)               │
+│  - Job dashboard    │ HTTP│  - API at /v1/                             │
+│  - Job creation     │ WS  │  - Static file serving                     │
+│  - System status    │     │  - Conductor hooks                         │
+│                     │     │  └─────────────────────────────────────────┘
+│                     │     │              Python Workers                │
+│                     │─────│── transformers_backend.py                  │
+│                     │     │  - LoRA fine-tuning                        │
+│                     │     │  - Kepler-optimized (F32, gradient accum)  │
+└─────────────────────┘     └─────────────────────────────────────────────┘
+```
 
- ### Fallback: PyTorch 1.13/1.14
- - Last official releases with sm_37 support
- - Missing modern features but proven to work
+---
 
- ## Training Strategy
+## Hardware Reality — NOUGHT
 
- ### Model Targets
- - **Immediate**: Sub-billion models (0.5B-1B) for validation with limited VRAM
- - **Primary**: 7B-13B LoRA fine-tuning distributed across 8 GPUs (full VRAM available)
+| Component | Spec | Impact |
+|-----------|------|--------|
+| CPU | 2x Xeon E5-2697v4 (72 cores total) | Dual NUMA: NUMA0→GPU0-3, NUMA1→GPU4-7 |
+| RAM | 128GB DDR4 ECC (64GB per NUMA) | Plenty for LoRA up to 13B params |
+| GPU | 8x Tesla K80 GK210 Kepler (~11.5GB each, sm_3.7) | ANCIENT. No tensor cores. CUDA 11.8 only. |
+| Storage | 225GB root NVMe (~84GB free) | TIGHT. Compress checkpoints. |
 
- ### Technical Approach
- 1. **F32 compute**: FP16 is slow on Kepler without tensor cores
- 2. **LoRA adapters**: Only train adapter weights; keep base model frozen
- 3. **DDP distribution**: torch.distributed across 8 GPUs
- 4. **Gradient checkpointing**: Trade compute for memory
- 5. **Checkpoint every 2048 steps**: Dense checkpoints enable surgical edits
+### GPU Availability
 
- ### NOT Compatible (save time)
- - Unsloth (requires Ampere+)
- - QLoRA 4-bit (unstable on Kepler)
- - Any tensor-core-only operations
+Production llama_wukong is running — most GPUs are occupied:
 
- ## Project Structure
+| GPUs | Status | Notes |
+|------|--------|-------|
+| 0,3,4,7 | **BUSY** | Primary production |
+| 1,2,5,6 | **PARTIAL** | ~1.5-2GB free — tiny models only |
 
- ```
- still-waiting/
- ├── README.md                  # this file
- ├── orchestrator/              # Rust API server
- │   ├── Cargo.toml
- │   └── src/
- │       ├── main.rs            # Entry point, binds :9999 (8000 taken)
- │       ├── api.rs             # OpenAI-style /v1/ endpoints
- │       ├── state.rs           # Jobs, checkpoints, models registry
- │       ├── conductor.rs       # Surgical edit hooks
- │       └── backend.rs         # Python worker IPC traits
- ├── tui/                       # Ratatui SSH client (scaffold)
- ├── gui/                       # Tauri + SvelteKit control panel (planned)
- ├── python/                    # Training worker runtime
- │   ├── worker.py              # Job executor, NUMA-aware
- │   ├── backends/
- │   │   └── transformers_backend.py  # Kepler LoRA training
- │   └── requirements.txt       # PyTorch + Transformers stack
- ├── deploy/                    # NOUGHT install scripts
- └── AGENTS.md                  # Our internal notes
- ```
+**Safe test models**: Qwen2.5-0.5B-Instruct (~1GB F32). Anything >3B requires full GPU allocation.
 
- ## API Reference
+---
 
- All endpoints on `http://NOUGHT:9999/v1/`
+## Project Structure
 
- | Method | Path | Purpose |
- |--------|------|---------|
- | POST | `/training/jobs` | Create training job |
- | GET | `/training/jobs` | List all jobs |
- | GET | `/training/jobs/:id` | Job status + checkpoints |
- | POST | `/training/jobs/:id/pause|resume` | Control |
- | POST | `/training/jobs/:id/checkpoint` | Worker reports checkpoint |
- | POST | `/training/jobs/:id/conductor` | Apply surgical edit |
+```
+still-waiting/
+├── README.md                      # this file
+├── TODO.md                        # status and next steps
+├── AGENTS.md                      # internal notes
+├── orchestrator/                  # Rust API server + static file server
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs                # entry point, serves GUI + API
+│       ├── api.rs                 # /v1/ endpoints
+│       ├── state.rs               # jobs, checkpoints, models
+│       ├── conductor.rs           # surgical edit hooks
+│       └── backend.rs             # worker IPC traits
+├── gui/                           # Browser control panel (React+Vite+Tailwind)
+│   ├── src/                       # React components
+│   ├── dist/                      # built production bundle
+│   └── package.json
+├── python/                        # Training worker
+│   ├── worker.py                  # job executor, NUMA-aware
+│   ├── backends/
+│   │   └── transformers_backend.py  # Kepler LoRA training loop
+│   └── requirements.txt
+├── deploy/
+│   ├── start_still_waiting.sh     # startup/control script
+│   └── orchestrator.service       # systemd unit
+└── tui/                           # Ratatui SSH client (planned)
+```
 
- Tested and working:
- ```bash
- # Create job
- curl -X POST http://localhost:9999/v1/training/jobs \
-   -H "Content-Type: application/json" \
-   -d '{"model": "Qwen/Qwen2.5-0.5B-Instruct", "target_steps": 100}'
+---
 
- # List jobs
- curl http://localhost:9999/v1/training/jobs
- ```
+## API Reference
 
- ## Design Decisions
+All endpoints: `http://NOUGHT:9999/v1/`
 
- 1. **No Docker** — Direct CUDA access, native debugging, shared filesystem
- 2. **OpenAI-compatible API** — Standard surface, trivial client integration
- 3. **Conductor hook** — Built-in place for median-arc evaluation and human reinforcement
- 4. **Free-form job config** — Pass any hyperparams without changing Rust core
- 5. **Checkpoint-first** — 2048-step cadence; surgical edits require dense history
- 6. **Build from source when needed** — We've done it for llama.cpp; we'll do it for PyTorch
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/training/jobs` | Create training job |
+| GET | `/training/jobs` | List all jobs |
+| GET | `/training/jobs/:id` | Job status + checkpoints |
+| POST | `/training/jobs/:id/pause` | Pause job |
+| POST | `/training/jobs/:id/resume` | Resume job |
+| POST | `/training/jobs/:id/checkpoint` | Worker reports checkpoint |
+| POST | `/training/jobs/:id/conductor` | Apply surgical edit |
+| POST | `/training/jobs/:id/complete` | Mark job complete |
+| POST | `/training/jobs/:id/fail` | Report job failure |
+| GET | `/models` | List trained models |
+| GET | `/system/status` | System info, GPU status, uptime |
 
-## Session Summary — 2026-09-19
+### Create Job Request
 
-### Completed
-- ✅ Full project scaffold (Rust orchestrator, Python worker, TUI, deploy scripts)
-- ✅ Orchestrator built and tested on NOUGHT (port 9999, all endpoints working)
-- ✅ PyTorch 2.4.0-rc8 built from source with sm_37 support
-- ✅ CUDA compute validated on Kepler (matmul, attention, backprop all working)
-- ✅ transformers 4.40.0 + peft 0.7.0 installed
-- ✅ LoRA training pipeline validated on Qwen2.5-0.5B-Instruct (forward+backward OK)
-- ✅ All knowledge captured from llama_wukong (kepler-fixes.patch, fattn kernels, NUMA patterns)
+```json
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "target_steps": 1000,
+  "config": {
+    "dataset_path": "/data/training.jsonl",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "max_seq_length": 512,
+    "learning_rate": 2e-4,
+    "batch_size": 2,
+    "gradient_accumulation_steps": 8
+  }
+}
+```
 
-### Next Session Priorities
-1. Implement full training loop in transformers_backend.py
-2. Deploy python worker code to NOUGHT
-3. Test distributed training across multiple GPUs
-4. Build TUI for SSH monitoring
-5. Design GUI wireframes
+---
 
-### Critical Knowledge for Continuation
-- PyTorch 2.4.0a0 installed editable from `/home/whistler/pytorch-kepler` in venv311
-- venv311 path: `/home/whistler/venv311/bin/activate`
-- Orchestrator runs on port 9999 (8000 in use by production)
-- NUMA topology: NUMA0→GPU0-3, NUMA1→GPU4-7; use `numactl --cpunodebind=X --membind=X`
-- GCC-11 is required host compiler (`/usr/bin/gcc-11`)
-- CUDA 11.8 at `/usr/local/cuda-11.8`
-- cuDNN not available (version=None) — cuBLAS legacy APIs only
+## Training Backend
 
- ---
- **Built by UnobligatedRascal. Ancient hardware, fresh ambition. We rebuild what the world abandoned.**
+### Configuration Options
+
+Via job `config` object:
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| `max_seq_length` | 512 | Reduced for Kepler VRAM |
+| `lora_r` | 16 | LoRA rank |
+| `lora_alpha` | 32 | LoRA scaling |
+| `lora_dropout` | 0.05 | Dropout rate |
+| `target_modules` | ["q_proj", "v_proj"] | LoRA target layers |
+| `learning_rate` | 2e-4 | AdamW LR |
+| `batch_size` | 2 | Per-GPU batch |
+| `gradient_accumulation_steps` | 8 | Effective batch = batch_size × accum × GPUs |
+| `warmup_ratio` | 0.05 | Linear warmup |
+| `dataset_path` | null | JSONL file, directory, or HF dataset name |
+
+### Dataset Format (JSONL)
+
+Each line is a JSON object:
+
+```json
+{"text": "Full training text here..."}
+```
+
+Or chat-style:
+
+```json
+{"messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi!"}]}
+```
+
+### Kepler Optimizations Applied
+
+1. **F32 compute** — FP16 is slow without tensor cores
+2. **Legacy cuBLAS only** — cuBLAS Ex APIs crash on Kepler
+3. **Gradient accumulation** — Kepler needs larger effective batch sizes
+4. **NUMA pinning** — 2.5x speedup (handled by worker.py via numactl)
+5. **Periodic cache clearing** — every 64 steps to manage limited VRAM
+6. **Gradient clipping** — max_norm=1.0 for training stability
+
+---
+
+## GUI
+
+Browser-based SPA served from orchestrator. No separate install needed.
+
+### Features
+
+- **Dashboard**: Live job status, auto-refresh every 5s
+- **Job creation**: Model ref, target steps, dataset path
+- **Job detail**: Checkpoint history, loss metrics, pause/resume controls
+- **System status**: Orchestrator uptime, job counts, live GPU usage bars
+
+### Development
+
+```bash
+cd gui
+npm install
+npm run dev   # proxies /v1 to NOUGHT:9999
+npm run build # outputs to dist/
+```
+
+---
+
+## Orchestration
+
+### Start/Stop/Restart
+
+Via startup script (recommended):
+
+```bash
+# Start (requires root)
+sudo /home/whistler/still-waiting/deploy/start_still_waiting.sh start
+
+# Stop
+sudo /home/whistler/still-waiting/deploy/start_still_waiting.sh stop
+
+# Restart
+sudo /home/whistler/still-waiting/deploy/start_still_waiting.sh restart
+
+# Status
+/home/whistler/still-waiting/deploy/start_still_waiting.sh status
+
+# Run in foreground (no root)
+/home/whistler/still-waiting/deploy/start_still_waiting.sh user
+```
+
+Via systemd (if installed):
+
+```bash
+sudo systemctl start still-waiting-orchestrator
+sudo systemctl stop still-waiting-orchestrator
+sudo systemctl restart still-waiting-orchestrator
+sudo systemctl status still-waiting-orchestrator
+sudo systemctl enable still-waiting-orchestrator  # auto-start on boot
+```
+
+### Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ORCH_BIND_ADDR` | 0.0.0.0 | Bind address |
+| `ORCH_BIND_PORT` | 9999 | Bind port |
+| `ORCH_STATIC_DIR` | gui/dist | Path to GUI dist files |
+| `CHECKPOINT_EVERY` | 2048 | Checkpoint interval (worker) |
+| `NUMA_NODE` | 0 | Worker NUMA domain |
+
+---
+
+## Known Limitations
+
+- **cuDNN unavailable** — using cuBLAS legacy APIs only
+- **No tensor cores** — FP16 is slow; we use F32
+- **VRAM limited** — only sub-billion models on partial GPUs
+- **Storage tight** — checkpoint compression needed for long runs
+- **Worker auto-spawning not implemented** — workers launched manually for now
+- **nought-ssh extension** — may need manual credential update (password changed)
+
+---
+
+## What Works on Kepler sm_37
+
+Proven from llama_wukong:
+
+- ✅ PyTorch 2.4.0-rc8 built from source with sm_37
+- ✅ Legacy cuBLAS (Sgemm, not SgemmEx)
+- ✅ Flash Attention tile kernels (no tensor cores needed)
+- ✅ AdamW GPU optimizer
+- ✅ NCCL distributed training across 8 GPUs
+- ✅ NUMA replication = 2.5x speedup
+- ✅ MMQ quantized matmul via DP4A
+- ✅ transformers + PEFT LoRA pipeline
+
+---
+
+## Next Steps
+
+See `TODO.md` for current priorities.
+
+---
+
+**Built by UnobligatedRascal. Ancient hardware, fresh ambition. We rebuild what the world abandoned.**

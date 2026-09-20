@@ -39,6 +39,31 @@ pub struct CheckpointRequest {
     pub step: u64,
 }
 
+#[derive(Serialize)]
+pub struct SystemStatus {
+    pub orchestrator: OrchestratorInfo,
+    pub jobs: JobCounts,
+    pub gpu_info: Option<String>,
+    pub restart_instructions: String,
+}
+
+#[derive(Serialize)]
+pub struct OrchestratorInfo {
+    pub version: String,
+    pub uptime_seconds: u64,
+    pub bind_addr: String,
+}
+
+#[derive(Serialize)]
+pub struct JobCounts {
+    pub total: usize,
+    pub running: usize,
+    pub queued: usize,
+    pub paused: usize,
+    pub completed: usize,
+    pub failed: usize,
+}
+
 pub fn routes(state: AppState) -> Router {
     Router::new()
         // Training jobs
@@ -53,7 +78,47 @@ pub fn routes(state: AppState) -> Router {
         .route("/v1/training/jobs/:id/fail", post(fail_job))
         // Models list
         .route("/v1/models", get(list_models))
+        // System
+        .route("/v1/system/status", get(system_status))
         .with_state(state)
+}
+
+async fn system_status(
+    State(state): State<AppState>,
+) -> JsonResponse<SystemStatus> {
+    let jobs = state.list_jobs().await;
+    let counts = JobCounts {
+        total: jobs.len(),
+        running: jobs.iter().filter(|j| j.status == JobStatus::Running).count(),
+        queued: jobs.iter().filter(|j| j.status == JobStatus::Queued).count(),
+        paused: jobs.iter().filter(|j| j.status == JobStatus::Paused).count(),
+        completed: jobs.iter().filter(|j| j.status == JobStatus::Completed).count(),
+        failed: jobs.iter().filter(|j| j.status == JobStatus::Failed).count(),
+    };
+
+    let uptime = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_secs());
+    let bind_addr = std::env::var("ORCH_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".into())
+        + ":" + &std::env::var("ORCH_BIND_PORT").unwrap_or_else(|_| "9999".into());
+
+    // Try to get GPU info (best effort)
+    let gpu_info = std::process::Command::new("nvidia-smi")
+        .arg("--query-gpu=index,name,memory.used,memory.total,temperature.gpu")
+        .arg("--format=csv,noheader,nounits")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .filter(|s| !s.is_empty());
+
+    JsonResponse(SystemStatus {
+        orchestrator: OrchestratorInfo {
+            version: env!("CARGO_PKG_VERSION").into(),
+            uptime_seconds: uptime,
+            bind_addr,
+        },
+        jobs: counts,
+        gpu_info,
+        restart_instructions: "Use startup script: sudo /home/whistler/still-waiting/deploy/start_still_waiting.sh restart\nOr systemd: sudo systemctl restart still-waiting-orchestrator".into(),
+    })
 }
 
 async fn create_job(
