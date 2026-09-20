@@ -1,13 +1,14 @@
 #!/bin/bash
-# still-waiting: Native install script for NOUGHT (Debian Bookworm/Q4OS)
+# still-waiting: Native install script for Debian-based systems
 # Run as: sudo ./install_nought.sh
 # UnobligatedRascal — Making old hardware sing.
 
 set -e
 
-echo "=== still-waiting Installer for NOUGHT ==="
-echo "Hardware: 8x Tesla K80 GK210 sm_37, Dual Xeon E5-2697v4, 128GB ECC"
+echo "=== still-waiting Installer ==="
 echo ""
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ============================================
 # Rust installation
@@ -26,37 +27,43 @@ fi
 # ============================================
 echo "[2/5] Verifying CUDA..."
 if ! command -v nvcc &>/dev/null; then
-    echo "  ERROR: CUDA not found. Expected CUDA 11.8 at /usr/local/cuda-11.8"
-    exit 1
+    echo "  WARNING: CUDA not found in PATH"
+    echo "  Expected CUDA toolkit at /usr/local/cuda"
+    echo "  Install CUDA 11.8 or compatible:"
+    echo "  https://developer.nvidia.com/cuda-toolkit-archive"
+else
+    echo "  CUDA: $(nvcc --version | head -1)"
 fi
-echo "  CUDA: $(nvcc --version | head -1)"
 
 # Check GPU access
-echo "  GPUs:"
-nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader 2>/dev/null | head -8
+if command -v nvidia-smi &>/dev/null; then
+    echo "  GPUs:"
+    nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader 2>/dev/null | head -8
+fi
 
 # ============================================
 # Build Rust orchestrator
 # ============================================
 echo "[3/5] Building Rust orchestrator..."
-cd /home/whistler/still-waiting/orchestrator
+cd "$PROJECT_DIR/orchestrator"
 cargo build --release
 echo "  Built: ./target/release/agent-orchestrator"
 
 # ============================================
-# Python environment (Kepler-compatible PyTorch)
+# Python environment
 # ============================================
 echo "[4/5] Setting up Python training environment..."
 
-# Create venv
-PYTHON_VENV="/home/whistler/.venvs/still-waiting"
+# Create venv next to project (customizable via PYTHON_VENV env var)
+PYTHON_VENV="${PYTHON_VENV:-$PROJECT_DIR/.venv}"
 python3 -m venv "$PYTHON_VENV"
 source "$PYTHON_VENV/bin/activate"
 pip install --upgrade pip
 
-# CRITICAL: Install Kepler-compatible PyTorch 1.14.0+cu118
-# Default pip wheels dropped sm_37 support in PyTorch 2.0+
-echo "  Installing PyTorch 1.14.0+cu118 (last sm_37 support)..."
+# CRITICAL for Kepler: Install Kepler-compatible PyTorch
+# PyTorch 1.14.0+cu118 is last official wheel with sm_37 support
+# For newer hardware, use pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+echo "  Installing PyTorch 1.14.0+cu118 (sm_37 support)..."
 pip install torch==1.14.0+cu118 torchvision==0.15.0+cu118 torchaudio==0.14.0+cu118 \
     --extra-index-url https://download.pytorch.org/whl/cu118
 
@@ -80,22 +87,25 @@ deactivate
 # Data directories
 # ============================================
 echo "[5/5] Creating data directories..."
-mkdir -p /data/checkpoints
-mkdir -p /data/models
-mkdir -p /data/training-data
+mkdir -p "$PROJECT_DIR/data/checkpoints"
+mkdir -p "$PROJECT_DIR/data/models"
+mkdir -p "$PROJECT_DIR/data/training-data"
 
 echo ""
 echo "=== Installation Complete ==="
 echo ""
+echo "Project: $PROJECT_DIR"
+echo "Venv: $PYTHON_VENV"
+echo ""
 echo "To run the orchestrator:"
-echo "  cd /home/whistler/still-waiting"
+echo "  cd $PROJECT_DIR"
 echo "  ./orchestrator/target/release/agent-orchestrator"
 echo ""
 echo "To run a training job (example):"
+echo "  source $PYTHON_VENV/bin/activate"
 echo "  NUMA_NODE=0 CUDA_VISIBLE_DEVICES=0,1,2,3 \\"
 echo "    numactl --cpunodebind=0 --membind=0 \\"
 echo "    torchrun --nproc_per_node=4 --master_port=29500 \\"
-echo "    python3 -m venv /home/whistler/.venvs/still-waiting \\"
-echo "    /home/whistler/.venvs/still-waiting/bin/python python/worker.py <job_id> <config.json>"
+echo "    python3 $PROJECT_DIR/python/worker.py <job_id> <config.json>"
 echo ""
-echo "API available at: http://0.0.0.0:8000/v1/training/jobs"
+echo "API available at: http://0.0.0.0:9999/v1/training/jobs"

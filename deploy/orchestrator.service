@@ -1,18 +1,26 @@
+# still-waiting systemd service (example)
+# Install to /etc/systemd/system/still-waiting-orchestrator.service
+# Edit paths below to match your installation!
+#
+# UnobligatedRascal — Ancient hardware, fresh ambition.
+
 [Unit]
 Description=still-waiting Agent Orchestrator
 After=network.target
 
 [Service]
 Type=simple
-User=whistler
-WorkingDirectory=/home/whistler/still-waiting
-ExecStart=/home/whistler/still-waiting/orchestrator/target/release/agent-orchestrator
+User=<YOUR_USER>
+Group=<YOUR_GROUP>
+WorkingDirectory=<PROJECT_ROOT>/orchestrator
+ExecStart=<PROJECT_ROOT>/orchestrator/target/release/agent-orchestrator
 Restart=on-failure
 RestartSec=10
 
 # Environment
+Environment=ORCH_STATIC_DIR=<PROJECT_ROOT>/gui/dist
 Environment=ORCH_BIND_ADDR=0.0.0.0
-Environment=ORCH_BIND_PORT=8000
+Environment=ORCH_BIND_PORT=9999
 
 # Logging
 StandardOutput=journal

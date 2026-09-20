@@ -1,13 +1,16 @@
 #!/bin/bash
-# still-waiting startup script for NOUGHT
-# Run as: sudo ./start_still_waiting.sh
-# Or: ./start_still_waiting.sh --user (runs without systemd)
+# still-waiting startup script
+# Run as: sudo ./start_still_waiting.sh (requires root for daemon mode)
+# Or: ./start_still_waiting.sh user (runs in foreground, no root)
 #
 # Built by UnobligatedRascal — Ancient hardware, fresh ambition.
 
 set -e
 
-PROJECT_DIR="/home/whistler/still-waiting"
+# Resolve project root relative to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 ORCH_BINARY="$PROJECT_DIR/orchestrator/target/release/agent-orchestrator"
 ORCH_STATIC="$PROJECT_DIR/gui/dist"
 LOG_DIR="$PROJECT_DIR/logs"
@@ -23,14 +26,13 @@ warn() { echo -e "${YELLOW}[still-waiting]${NC} $1"; }
 error() { echo -e "${RED}[still-waiting]${NC} $1"; }
 
 usage() {
-    echo "Usage: $0 [start|stop|restart|status|install-service|user]"
+    echo "Usage: $0 [start|stop|restart|status|user]"
     echo ""
     echo "Commands:"
     echo "  start            Start orchestrator in background (requires root)"
     echo "  stop             Stop orchestrator"
     echo "  restart          Restart orchestrator"
     echo "  status           Check orchestrator status"
-    echo "  install-service  Install systemd service (requires root)"
     echo "  user             Run in foreground (for testing, no root needed)"
     echo ""
     echo "Or just run: sudo $0  (defaults to start)"
@@ -49,12 +51,11 @@ check_prerequisites() {
     if [ ! -d "$ORCH_STATIC" ]; then
         error "GUI dist not found: $ORCH_STATIC"
         error "Run: cd $PROJECT_DIR/gui && npm install && npm run build"
-        error "Then deploy dist/ to NOUGHT"
         missing=1
     fi
 
     if ! command -v rustup &> /dev/null; then
-        warn "Rust not found in PATH. Add ~/.cargo/env to your shell profile."
+        warn "Rust not found in PATH. Run: . ~/.cargo/env"
     fi
 
     if ! command -v python3 &> /dev/null; then
@@ -140,42 +141,6 @@ status_check() {
     fi
 }
 
-install_systemd() {
-    if [ "$(id -u)" -ne 0 ]; then
-        error "Requires root. Run: sudo $0 install-service"
-        exit 1
-    fi
-
-    local service_file="/etc/systemd/system/still-waiting-orchestrator.service"
-    cat > "$service_file" << 'EOF'
-[Unit]
-Description=Still-Waiting Training Orchestrator
-After=network.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=whistler
-Group=whistler
-WorkingDirectory=/home/whistler/still-waiting/orchestrator
-Environment=ORCH_STATIC_DIR=/home/whistler/still-waiting/gui/dist
-ExecStart=/home/whistler/still-waiting/orchestrator/target/release/agent-orchestrator
-Restart=on-failure
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable still-waiting-orchestrator
-    info "Systemd service installed"
-    info "Start with: sudo systemctl start still-waiting-orchestrator"
-}
-
 case "${1:-}" in
     start)
         if [ "$(id -u)" -ne 0 ]; then
@@ -200,9 +165,6 @@ case "${1:-}" in
         ;;
     status)
         status_check
-        ;;
-    install-service)
-        install_systemd
         ;;
     user)
         check_prerequisites

@@ -1,6 +1,6 @@
 # still-waiting GUI
 
-Browser-based control panel for NOUGHT training operations. Served directly from the orchestrator at `http://NOUGHT:9999/`.
+Browser-based control panel for training operations. Served directly from the orchestrator at `http://<YOUR_TRAINING_NODE_IP>:9999/`.
 
 Built with React + Vite + TailwindCSS.
 
@@ -9,7 +9,7 @@ Built with React + Vite + TailwindCSS.
 ```
 ┌─────────────────┐ HTTP+WS   ┌──────────────────┐        ┌─────────────────┐
 │  Your Browser   │ ────────► │  orchestrator    │ ───────│  Python workers │
-│  (:9999/)       │           │  (:9999/v1/api)  │        │  (Kepler GPUs)  │
+│  (:9999/)       │           │  (:9999/v1/api)  │        │  (CUDA GPUs)    │
 └─────────────────┘           └──────────────────┘        └─────────────────┘
 ```
 
@@ -30,12 +30,12 @@ npm install
 npm run dev
 ```
 
-Dev server proxies `/v1` requests to NOUGHT (set `VITE_PROXY_TARGET=http://<ip>:9999`).
+Dev server proxies `/v1` requests to your training node (set `VITE_PROXY_TARGET=http://<ip>:9999`).
 
 ### Build for deployment
 ```bash
 npm run build
-# Output: gui/dist/ — copy to NOUGHT /home/whistler/still-waiting/gui/dist/
+# Output: gui/dist/ — deploy to your training node alongside the orchestrator
 ```
 
 ## Features
@@ -49,12 +49,12 @@ npm run build
 
 Build output is served by orchestrator. Configure with:
 ```bash
-ORCH_STATIC_DIR=/home/whistler/still-waiting/gui/dist ./agent-orchestrator
+ORCH_STATIC_DIR=<PATH_TO_PROJECT>/gui/dist ./agent-orchestrator
 ```
 
 ## Why browser-based (not Tauri)?
 
-NOUGHT is headless on LAN — the GUI always runs remotely anyway. Browser gives:
+Training nodes are typically headless — the GUI always runs remotely. Browser gives:
 - Zero install friction — open browser, go
 - Accessible from any device on LAN (laptop, tablet, phone)
 - Simpler deployment — no native builds, no per-platform packaging

@@ -117,7 +117,7 @@ async fn system_status(
         },
         jobs: counts,
         gpu_info,
-        restart_instructions: "Use startup script: sudo /home/whistler/still-waiting/deploy/start_still_waiting.sh restart\nOr systemd: sudo systemctl restart still-waiting-orchestrator".into(),
+        restart_instructions: "Use startup script: sudo <PROJECT_ROOT>/deploy/start_still_waiting.sh restart\nOr systemd: sudo systemctl restart still-waiting-orchestrator".into(),
     })
 }
 

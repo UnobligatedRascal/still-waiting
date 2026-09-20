@@ -36,3 +36,8 @@ dist/
 
 # Logs
 *.log
+
+# Private development docs
+AGENTS.md
+TODO.md
+*.git-credentials

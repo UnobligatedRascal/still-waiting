@@ -3,9 +3,9 @@
 > "We don't settle for right. We make people forget what boxes even were."
 > — UnobligatedRascal
 
-Turn NOUGHT (Xeon E5-2697v4 + 128GB ECC + 8x Tesla K80 Kepler) into a lean, private LLM training rig — despite 13-year-old hardware and total ecosystem abandonment.
+Turn your Kepler-era rig into a lean, private LLM training station — despite 13-year-old hardware and total ecosystem abandonment.
 
-**Access**: `http://<YOUR_NOUGHT_IP>:9999/` (when orchestrator is running)
+**Access**: `http://<YOUR_TRAINING_NODE_IP>:9999/` (when orchestrator is running)
 
 ---
 
@@ -45,7 +45,7 @@ sudo ./scripts/setup.sh --start
 
 ### From your browser
 
-Point to: **`http://<YOUR_NOUGHT_IP>:9999/`**
+Point to: **`http://<YOUR_TRAINING_NODE_IP>:9999/`**
 
 Create a training job with:
 - Model: `Qwen/Qwen2.5-0.5B-Instruct` (safe for partial GPUs)
@@ -56,17 +56,17 @@ Create a training job with:
 
 ```bash
 # Activate Python environment
-source /home/whistler/venv311/bin/activate
+source <YOUR_VENV_PATH>/bin/activate
 
-# Single GPU (e.g., GPU 1)
+# Single GPU
 numactl --cpunodebind=0 --membind=0 \
-  CUDA_VISIBLE_DEVICES=1 \
-  python3 /home/whistler/still-waiting/python/worker.py <job_id> <config.json>
+  CUDA_VISIBLE_DEVICES=0 \
+  python3 <PROJECT_ROOT>/python/worker.py <job_id> <config.json>
 
-# Multiple GPUs (DDP, NUMA0)
+# Multiple GPUs (DDP, same NUMA node)
 numactl --cpunodebind=0 --membind=0 \
   torchrun --nproc_per_node=2 \
-  python3 /home/whistler/still-waiting/python/worker.py <job_id> <config.json>
+  python3 <PROJECT_ROOT>/python/worker.py <job_id> <config.json>
 ```
 
 ---
@@ -75,7 +75,7 @@ numactl --cpunodebind=0 --membind=0 \
 
 ```
 ┌─────────────────────┐     ┌─────────────────────────────────────────────┐
-│   Your Browser      │     │              NOUGHT (<YOUR_IP>)         │
+│   Your Browser      │     │              Training Node                    │
 │                     │     │                                             │
 │  GUI (SPA at /)     │◄────│── agent-orchestrator (:9999)               │
 │  - Job dashboard    │ HTTP│  - API at /v1/                             │
@@ -91,25 +91,28 @@ numactl --cpunodebind=0 --membind=0 \
 
 ---
 
-## Hardware Reality — NOUGHT
+## Hardware Reality
 
-| Component | Spec | Impact |
-|-----------|------|--------|
-| CPU | 2x Xeon E5-2697v4 (72 cores total) | Dual NUMA: NUMA0→GPU0-3, NUMA1→GPU4-7 |
-| RAM | 128GB DDR4 ECC (64GB per NUMA) | Plenty for LoRA up to 13B params |
+Built for and tested on dual-socket Xeon + 8x Tesla K80 (sm_37) — but the code works on any CUDA-capable rig.
+
+| Component | Test Spec | Impact |
+|-----------|-----------|--------|
+| CPU | 2x Xeon E5-2697v4 (72 cores total) | Dual NUMA domains; pin workers to NUMA nodes |
+| RAM | 128GB DDR4 ECC | Plenty for LoRA up to 13B params |
 | GPU | 8x Tesla K80 GK210 Kepler (~11.5GB each, sm_3.7) | ANCIENT. No tensor cores. CUDA 11.8 only. |
-| Storage | 225GB root NVMe (~84GB free) | TIGHT. Compress checkpoints. |
+| Storage | ~200GB NVMe | Manage checkpoints carefully |
 
-### GPU Availability
+### NUMA Awareness
 
-Production llama_wukong is running — most GPUs are occupied:
+On dual-socket systems, pin workers to NUMA nodes for ~2.5x speedup:
 
-| GPUs | Status | Notes |
-|------|--------|-------|
-| 0,3,4,7 | **BUSY** | Primary production |
-| 1,2,5,6 | **PARTIAL** | ~1.5-2GB free — tiny models only |
+```bash
+# NUMA node 0 (e.g., GPUs 0-3)
+numactl --cpunodebind=0 --membind=0 CUDA_VISIBLE_DEVICES=0,1 python3 worker.py ...
 
-**Safe test models**: Qwen2.5-0.5B-Instruct (~1GB F32). Anything >3B requires full GPU allocation.
+# NUMA node 1 (e.g., GPUs 4-7)
+numactl --cpunodebind=1 --membind=1 CUDA_VISIBLE_DEVICES=4,5 python3 worker.py ...
+```
 
 ---
 
@@ -118,8 +121,6 @@ Production llama_wukong is running — most GPUs are occupied:
 ```
 still-waiting/
 ├── README.md                      # this file
-├── TODO.md                        # status and next steps
-├── AGENTS.md                      # internal notes
 ├── orchestrator/                  # Rust API server + static file server
 │   ├── Cargo.toml
 │   └── src/
@@ -139,7 +140,7 @@ still-waiting/
 │   └── requirements.txt
 ├── deploy/
 │   ├── start_still_waiting.sh     # startup/control script
-│   └── orchestrator.service       # systemd unit
+│   └── orchestrator.service       # systemd unit (example)
 └── tui/                           # Ratatui SSH client (planned)
 ```
 
@@ -147,7 +148,7 @@ still-waiting/
 
 ## API Reference
 
-All endpoints: `http://NOUGHT:9999/v1/`
+All endpoints: `http://<YOUR_IP>:9999/v1/`
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -191,7 +192,7 @@ Via job `config` object:
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `max_seq_length` | 512 | Reduced for Kepler VRAM |
+| `max_seq_length` | 512 | Reduce for VRAM-constrained GPUs |
 | `lora_r` | 16 | LoRA rank |
 | `lora_alpha` | 32 | LoRA scaling |
 | `lora_dropout` | 0.05 | Dropout rate |
@@ -243,7 +244,7 @@ Browser-based SPA served from orchestrator. No separate install needed.
 ```bash
 cd gui
 npm install
-npm run dev   # proxies /v1 to NOUGHT:9999
+npm run dev   # proxies /v1 to your training node
 npm run build # outputs to dist/
 ```
 
@@ -257,19 +258,19 @@ Via startup script (recommended):
 
 ```bash
 # Start (requires root)
-sudo /home/whistler/still-waiting/deploy/start_still_waiting.sh start
+sudo <PROJECT_ROOT>/deploy/start_still_waiting.sh start
 
 # Stop
-sudo /home/whistler/still-waiting/deploy/start_still_waiting.sh stop
+sudo <PROJECT_ROOT>/deploy/start_still_waiting.sh stop
 
 # Restart
-sudo /home/whistler/still-waiting/deploy/start_still_waiting.sh restart
+sudo <PROJECT_ROOT>/deploy/start_still_waiting.sh restart
 
 # Status
-/home/whistler/still-waiting/deploy/start_still_waiting.sh status
+<Project_ROOT>/deploy/start_still_waiting.sh status
 
 # Run in foreground (no root)
-/home/whistler/still-waiting/deploy/start_still_waiting.sh user
+<Project_ROOT>/deploy/start_still_waiting.sh user
 ```
 
 Via systemd (if installed):
@@ -296,18 +297,16 @@ sudo systemctl enable still-waiting-orchestrator  # auto-start on boot
 
 ## Known Limitations
 
-- **cuDNN unavailable** — using cuBLAS legacy APIs only
-- **No tensor cores** — FP16 is slow; we use F32
-- **VRAM limited** — only sub-billion models on partial GPUs
-- **Storage tight** — checkpoint compression needed for long runs
+- **cuDNN may be unavailable** on very old drivers — cuBLAS legacy APIs work fine
+- **No tensor cores** on Kepler — FP16 is slow; we use F32
+- **VRAM limited** on K80 — sub-billion models recommended for single GPU
 - **Worker auto-spawning not implemented** — workers launched manually for now
-- **nought-ssh extension** — may need manual credential update (password changed)
 
 ---
 
 ## What Works on Kepler sm_37
 
-Proven from llama_wukong:
+Proven and tested:
 
 - ✅ PyTorch 2.4.0-rc8 built from source with sm_37
 - ✅ Legacy cuBLAS (Sgemm, not SgemmEx)
@@ -317,12 +316,6 @@ Proven from llama_wukong:
 - ✅ NUMA replication = 2.5x speedup
 - ✅ MMQ quantized matmul via DP4A
 - ✅ transformers + PEFT LoRA pipeline
-
----
-
-## Next Steps
-
-See `TODO.md` for current priorities.
 
 ---
 
