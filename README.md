@@ -11,22 +11,36 @@ Turn NOUGHT (Xeon E5-2697v4 + 128GB ECC + 8x Tesla K80 Kepler) into a lean, priv
 
 ## Quick Start
 
-### On NOUGHT (first time)
+### Automated (recommended)
 
 ```bash
-# 1. Activate environment
-source ~/.cargo/env
+# Check your hardware compatibility
+./scripts/check_hardware.sh
 
-# 2. Build orchestrator (if not already built)
-cd /home/whistler/still-waiting/orchestrator
-cargo build --release
+# Full automated setup (installs deps, builds everything)
+sudo ./scripts/setup.sh
 
-# 3. Install systemd service (optional but recommended)
-sudo ./deploy/start_still_waiting.sh install-service
-sudo systemctl start still-waiting-orchestrator
+# Start and open browser
+./deploy/start_still_waiting.sh user
+```
 
-# OR run directly:
-./deploy/start_still_waiting.sh start
+Access at: `http://<YOUR_IP>:9999/`
+
+### Manual (for more control)
+
+See sections below for step-by-step instructions.
+
+### Options
+
+```bash
+# Skip PyTorch build (use existing install or pre-built wheel)
+sudo ./scripts/setup.sh --skip-pytorch
+
+# Custom PyTorch version
+sudo ./scripts/setup.sh --pytorch-version v2.4.0-rc8
+
+# Setup + auto-start
+sudo ./scripts/setup.sh --start
 ```
 
 ### From your browser
