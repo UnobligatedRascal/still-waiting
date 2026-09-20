@@ -3,6 +3,7 @@ import JobsTable from './components/JobsTable'
 import JobForm from './components/JobForm'
 import StatusBanner from './components/StatusBanner'
 import SystemStatus from './components/SystemStatus'
+import LossChart from './components/LossChart'
 
 const ORCH_URL = import.meta.env.VITE_ORCH_URL || '/v1'
 
@@ -296,13 +297,23 @@ function JobDetail({ job, onClose, onRefresh, getStatusPillClass }) {
           </div>
         </div>
 
-        {/* Checkpoints list */}
+        {/* Loss chart */}
         {job.checkpoints && job.checkpoints.length > 0 && (
           <div className="mt-4">
             <h3 className="mb-2 text-xs font-semibold text-gray-400">
+              Loss Curve
+            </h3>
+            <LossChart checkpoints={job.checkpoints} />
+          </div>
+        )}
+
+        {/* Checkpoints list */}
+        {job.checkpoints && job.checkpoints.length > 0 && (
+          <div className="mt-3">
+            <h3 className="mb-2 text-xs font-semibold text-gray-400">
               Checkpoint Timeline
             </h3>
-            <div className="max-h-48 overflow-y-auto rounded border border-gray-800 bg-dark/50">
+            <div className="max-h-36 overflow-y-auto rounded border border-gray-800 bg-dark/50">
               {job.checkpoints
                 .slice()
                 .reverse()
