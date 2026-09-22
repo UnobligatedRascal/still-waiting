@@ -321,10 +321,10 @@ class KeplerTransformersBackend:
                     torch_dtype=torch.float32,
                     trust_remote_code=True,
                 )
-                # TODO: Replace linear layers with LinearNF4
-                # For now, log that custom NF4 is requested but not fully implemented
-                log("WARNING: custom_nf4 mode requested but kernels not yet implemented.")
-                log("Falling back to F32. NF4 kernels coming in Phase 2.")
+                # Kernels validated (dequant + torch::mm). LinearNF4 layer swap is not wired.
+                # TODO: Replace nn.Linear weights with packed NF4 + NF4DequantizeFunction
+                log("WARNING: custom_nf4 requested. Dequant kernels are validated, but LinearNF4 is not integrated.")
+                log("Falling back to F32 until layer replacement lands.")
                 model_precision = "f32"  # Fallback
             except ImportError as e:
                 log(f"WARNING: nf4_kepler module not found ({e}). Falling back to F32.")
