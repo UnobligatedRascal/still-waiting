@@ -33,7 +33,8 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForLanguageModeling,
 )
-from peft import LoraConfig, get_peft_model, TaskType
+# Custom LoRA wrapper for NF4 — no PEFT dependency needed
+# PEFT doesn't support custom LinearNF4 without VRAM-expensive dummy weights
 
 # Distributed
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -311,24 +312,42 @@ class KeplerTransformersBackend:
             log("Model loaded with bitsandbytes NF4 4-bit quantization (QLoRA)")
 
         elif model_precision == "custom_nf4":
-            # Custom NF4 4-bit quantization for Kepler (in development)
-            # Falls back to F32 if kernels not ready or fail
+            # Custom NF4 4-bit quantization for Kepler sm_37
+            log("Using custom NF4 quantization for Kepler")
             try:
                 from kernels import nf4_kepler
-                log("Using custom NF4 quantization for Kepler")
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_ref,
-                    torch_dtype=torch.float32,
-                    trust_remote_code=True,
-                )
-                # Kernels validated (dequant + torch::mm). LinearNF4 layer swap is not wired.
-                # TODO: Replace nn.Linear weights with packed NF4 + NF4DequantizeFunction
-                log("WARNING: custom_nf4 requested. Dequant kernels are validated, but LinearNF4 is not integrated.")
-                log("Falling back to F32 until layer replacement lands.")
-                model_precision = "f32"  # Fallback
             except ImportError as e:
-                log(f"WARNING: nf4_kepler module not found ({e}). Falling back to F32.")
-                model_precision = "f32"
+                log(f"ERROR: nf4_kepler module not found ({e}). Cannot use custom_nf4.")
+                raise RuntimeError("NF4 kernels not available. Check python/kernels/ exists and nf4_cuda.py loads.")
+
+            # Load model in FP32
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_ref,
+                torch_dtype=torch.float32,
+                trust_remote_code=True,
+            )
+
+            # Replace target Linear layers with LinearNF4
+            nf4_targets = [m for m in target_modules if m and m != "all-linear"]
+            if nf4_targets:
+                log(f"Replacing {len(nf4_targets)} target module types with LinearNF4")
+                nf4_kepler.replace_linear_with_nf4(self.model, target_modules=nf4_targets, verbose=True)
+            else:
+                log("WARNING: no NF4 target modules specified. All Linear layers will be replaced.")
+                nf4_kepler.replace_linear_with_nf4(self.model, target_modules=None, verbose=True)
+
+            # Apply LoRA using our custom wrapper (no PEFT — avoids VRAM-expensive dummy weights)
+            log(f"Applying LoRA to NF4 layers (r={lora_r}, alpha={lora_alpha})")
+            self.model, _ = nf4_kepler.apply_lora_to_model(
+                self.model,
+                target_modules=nf4_targets if nf4_targets else None,
+                r=lora_r,
+                alpha=lora_alpha,
+                dropout=lora_dropout,
+                freeze_base=True,  # Standard QLoRA: only LoRA adapters trainable
+            )
+
+            log("NF4 quantization + LoRA complete. Model weights now stored in 4-bit NF4 format.")
 
         elif model_precision == "f16_storage":
             # FP16 weights for VRAM savings, FP32 compute for Kepler correctness
@@ -349,17 +368,20 @@ class KeplerTransformersBackend:
             )
             log("Model loaded in FP32")
         
-        # Apply LoRA
-        log(f"Applying LoRA (r={lora_r}, alpha={lora_alpha}, targets={target_modules})")
-        lora_config = LoraConfig(
-            r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            target_modules=target_modules,
-            task_type=TaskType.CAUSAL_LM,
-            bias="none",
-        )
-        self.model = get_peft_model(self.model, lora_config)
+        # Apply LoRA (PEFT for F32/F16/bnb; custom wrapper for NF4 done above)
+        if model_precision != "custom_nf4":
+            log(f"Applying LoRA (r={lora_r}, alpha={lora_alpha}, targets={target_modules})")
+            from peft import LoraConfig as PEFTLoraConfig, get_peft_model, TaskType
+
+            lora_config = PEFTLoraConfig(
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                target_modules=target_modules,
+                task_type=TaskType.CAUSAL_LM,
+                bias="none",
+            )
+            self.model = get_peft_model(self.model, lora_config)
         
         # Move to device
         self.model.to(device)

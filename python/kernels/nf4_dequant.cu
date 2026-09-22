@@ -129,7 +129,9 @@ torch::Tensor nf4_linear_forward(
     const torch::Tensor& input,
     const torch::Tensor& weight_nf4,
     const torch::Tensor& weight_scales,
-    const torch::Tensor& bias
+    const torch::Tensor& bias,
+    const int true_out_features,
+    const int in_features
 ) {
     TORCH_CHECK(input.is_cuda(), "input must be on CUDA");
     TORCH_CHECK(weight_nf4.is_cuda(), "weight_nf4 must be on CUDA");
@@ -137,45 +139,60 @@ torch::Tensor nf4_linear_forward(
     TORCH_CHECK(weight_nf4.dtype() == torch::kUInt8, "weight_nf4 must be uint8");
     TORCH_CHECK(weight_scales.dtype() == torch::kFloat32, "weight_scales must be float32");
     TORCH_CHECK(input.dtype() == torch::kFloat32, "input must be float32 (Kepler: F32 compute)");
+    TORCH_CHECK(true_out_features > 0, "true_out_features must be > 0");
+    TORCH_CHECK(in_features > 0, "in_features must be > 0");
 
     const int batch_size = input.size(0);
-    const int in_features = input.size(-1);
-    const int out_features = weight_nf4.numel() * 2 / in_features; // NF4: 2 values per byte
 
     // Handle both 2D (batch, in_features) and 3D (batch, seq_len, in_features)
     bool is_3d = input.dim() == 3;
     const int total_m = is_3d ? batch_size * input.size(1) : batch_size;
 
     // Step 1: Dequantize weights to temporary buffer
-    // Weight shape: (out_features, in_features)
-    const int weight_elements = out_features * in_features;
-    const int weight_bytes = weight_elements / 2;
+    // Dequantized size may include padding from NF4 block alignment
+    const int dequant_elements = weight_nf4.numel() * 2;
+    const int padded_out_features = dequant_elements / in_features;
 
-    at::Tensor weight_fp32 = torch::empty({out_features, in_features},
+    at::Tensor weight_fp32_full = torch::empty({padded_out_features, in_features},
         torch::TensorOptions().dtype(torch::kFloat32).device(input.device()));
 
     cudaStream_t stream = 0;
     launch_dequantize(
         weight_nf4.data_ptr<unsigned char>(),
         weight_scales.data_ptr<float>(),
-        weight_fp32.data_ptr<float>(),
-        weight_bytes,
+        weight_fp32_full.data_ptr<float>(),
+        weight_nf4.numel(),
         stream);
+
+    // Step 1b: Trim to true shape (remove NF4 padding)
+    at::Tensor weight_fp32;
+    if (padded_out_features > true_out_features) {
+        weight_fp32 = weight_fp32_full.slice(0, 0, true_out_features);
+    } else {
+        weight_fp32 = weight_fp32_full;
+    }
+
+    // Verify shape
+    TORCH_CHECK(weight_fp32.size(0) == true_out_features,
+        "weight out_features mismatch: got ", weight_fp32.size(0), ", expected ", true_out_features);
+    TORCH_CHECK(weight_fp32.size(1) == in_features,
+        "weight in_features mismatch: got ", weight_fp32.size(1), ", expected ", in_features);
 
     // Step 2: Reshape input to (total_m, in_features) for matmul
     at::Tensor input_2d = is_3d ? input.view({total_m, in_features}) : input;
 
-    // Step 3: y = input @ W^T using PyTorch (which uses cuBLAS internally)
+    // Step 3: y = input @ W^T using PyTorch (which uses cuBLAS Sgemm internally)
     at::Tensor output_2d = torch::mm(input_2d, weight_fp32.t());
 
     // Step 4: Add bias if present
     if (bias.defined() && bias.numel() > 0) {
+        TORCH_CHECK(bias.size(0) == true_out_features, "bias size mismatch");
         output_2d = output_2d + bias;
     }
 
     // Step 5: Reshape back to original dimensions
     if (is_3d) {
-        return output_2d.view({batch_size, input.size(1), out_features});
+        return output_2d.view({batch_size, input.size(1), true_out_features});
     } else {
         return output_2d;
     }
@@ -189,5 +206,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("input"),
           py::arg("weight_nf4"),
           py::arg("weight_scales"),
-          py::arg("bias"));
+          py::arg("bias"),
+          py::arg("true_out_features"),
+          py::arg("in_features"));
 }

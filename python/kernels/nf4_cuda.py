@@ -62,7 +62,9 @@ def nf4_linear_forward(
     input: torch.Tensor,
     weight_nf4: torch.Tensor,
     weight_scales: torch.Tensor,
-    bias: torch.Tensor = None
+    bias: torch.Tensor | None = None,
+    true_out_features: int | None = None,
+    in_features: int | None = None
 ) -> torch.Tensor:
     """
     NF4 linear layer forward: y = input @ W_nf4^T + bias
@@ -73,9 +75,11 @@ def nf4_linear_forward(
     Args:
         input: FP32 tensor of shape (batch, in_features) or (batch, seq_len, in_features)
         weight_nf4: uint8 packed NF4 weights, flat shape (n_bytes,)
-            Represents (out_features, in_features) matrix
+            Represents (out_features, in_features) matrix (may include NF4 padding)
         weight_scales: FP32 per-block scales, shape (n_blocks,)
         bias: optional FP32 bias, shape (out_features,)
+        true_out_features: actual output features (before NF4 padding). Inferred from input if None.
+        in_features: actual input features. Inferred from input if None.
 
     Returns:
         FP32 output of shape (batch, out_features) or (batch, seq_len, out_features)
@@ -83,10 +87,19 @@ def nf4_linear_forward(
     if _extension is None:
         _get_extension()
 
+    if in_features is None:
+        in_features = input.size(-1)
+    if true_out_features is None:
+        # Infer from weight size (may include padding — kernel handles trim)
+        true_out_features = weight_nf4.numel() * 2 // in_features
+
     if bias is None:
         bias = torch.empty(0, dtype=torch.float32, device=input.device)
 
-    return _extension.nf4_linear_forward(input, weight_nf4, weight_scales, bias)
+    return _extension.nf4_linear_forward(
+        input, weight_nf4, weight_scales, bias,
+        true_out_features, in_features
+    )
 
 
 class NF4DequantizeFunction(torch.autograd.Function):
