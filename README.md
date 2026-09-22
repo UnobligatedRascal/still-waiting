@@ -137,6 +137,10 @@ still-waiting/
 │   ├── worker.py                  # job executor, NUMA-aware
 │   ├── backends/
 │   │   └── transformers_backend.py  # Kepler LoRA training loop
+│   ├── kernels/                   # Custom NF4 CUDA kernels for sm_37
+│   │   ├── nf4_dequant.cu         # Dequantize + fused matmul kernels
+│   │   ├── nf4_cuda.py            # PyTorch extension wrapper
+│   │   └── nf4_kepler.py          # CPU reference implementation
 │   └── requirements.txt
 ├── deploy/
 │   ├── start_still_waiting.sh     # startup/control script
@@ -208,8 +212,9 @@ Via job `config` object:
 **model_precision modes**:
 - `f32`: Full precision. Safe, slowest, most VRAM. Default.
 - `f16_storage`: Load weights in FP16 (half VRAM during load), compute in FP32. Recommended for 3B+ models.
-- `bnb_nf4`: bitsandbytes QLoRA. ⚠️ Requires bitsandbytes install; currently BROKEN on Kepler sm_37.
-- `custom_nf4`: Custom NF4 4-bit quantization for Kepler (⏳ in development). ~7.8x compression vs FP32.
+- `bnb_nf4`: bitsandbytes QLoRA. ⚠️ BROKEN on Kepler sm_37 (requires CC 6.0+). DO NOT USE.
+- `custom_nf4`: Custom NF4 4-bit quantization for Kepler. CUDA dequantize + matmul kernels validated.
+  ~7.1x compression vs FP32. Integration with training loop in progress.
 
 **target_modules**: Auto-detected based on model name. Qwen2.5 → all attention layers. Llama-3 → all attention layers. Override manually if needed.
 
@@ -309,8 +314,11 @@ sudo systemctl enable still-waiting-orchestrator  # auto-start on boot
 
 - **cuDNN may be unavailable** on very old drivers — cuBLAS legacy APIs work fine
 - **No tensor cores** on Kepler — FP16 is slow; we use F32
-- **VRAM limited** on K80 — sub-billion models recommended for single GPU
+- **bitsandbytes NF4 broken** — requires CC 6.0+, Kepler is CC 3.7. Our custom NF4 kernels bypass this.
 - **Worker auto-spawning not implemented** — workers launched manually for now
+- **NF4 training integration** — dequantize kernels ready; LinearNF4 layer and model integration in progress
+
+**NF4 kernel build requirements**: GCC 11 required (GCC 12 breaks nvcc for CUDA 11.8). See AGENTS.md for details.
 
 ---
 
@@ -326,6 +334,8 @@ Proven and tested:
 - ✅ NUMA replication = 2.5x speedup
 - ✅ MMQ quantized matmul via DP4A
 - ✅ transformers + PEFT LoRA pipeline
+- ✅ Custom NF4 dequantize CUDA kernel (validated, max diff = 0 vs CPU)
+- ✅ NF4 fused dequantize + matmul (7.1x weight compression)
 
 ---
 

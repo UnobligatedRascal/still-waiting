@@ -4,7 +4,7 @@
 >
 > **Guiding principle**: NOUGHT is our constraint and our advantage. Design for it — use all 92GB VRAM, all 72 CPU cores, all 128GB RAM. Exploit the topology. Don't fight it.
 
-**Last updated**: 2026-09-21
+**Last updated**: 2026-09-23
 
 ---
 
@@ -37,32 +37,31 @@ NUMA0 (Socket 0)                    NUMA1 (Socket 1)
 
 ## Current Limitations
 
-### 1. No QLoRA (4-bit NF4 quantization) — CONFIRMED BROKEN ON KEPLER
+### 1. bitsandbytes QLoRA — BROKEN ON KEPLER (custom NF4 kernels in progress)
 
-**Status**: Tested bitsandbytes 0.50.2 (latest) on NOUGHT Kepler sm_37 — **runtime failure**.
+**Status**: bitsandbytes 0.50.2 — **runtime failure** on NOUGHT Kepler sm_37.
 
 **Test result**: `Error named symbol not found at line 74 in file /src/csrc/ops.cu`
 
-**Root cause**: bitsandbytes NF4 CUDA kernels use PTX instructions not available on compute capability 3.7. Official minimum is CC 6.0 (Pascal). Older bitsandbytes 0.43.x-0.44.x had Kepler source support but those tags are gone from GitHub, and the NF4 kernels likely still require newer instructions.
+**Root cause**: bitsandbytes NF4 CUDA kernels use PTX instructions not available on CC 3.7. Official minimum is CC 6.0 (Pascal).
+
+**OUR SOLUTION — Custom NF4 kernels**: Phase 1-2 complete ✅
+- `python/kernels/nf4_dequant.cu`: CUDA dequantize kernel (validated on Kepler, max diff = 0 vs CPU)
+- Fused dequantize + matmul via cuBLAS Sgemm (validated)
+- 7.1x compression ratio for weights
+- Autograd function with straight-through estimator
+- Remaining: LinearNF4 layer, layer replacement pass, training integration
 
 **Impact**:
-| Model | F32 VRAM per GPU | Fits on single K80 (11.5GB)? |
-|-------|------------------|-------------------------------|
-| Qwen2.5-0.5B | 2GB | ✅ Yes |
-| Qwen2.5-1.5B | 6GB | ✅ Tight |
-| Qwen2.5-3B | 12GB | ❌ No |
-| Qwen2.5-7B | 28GB | ❌ No |
-| Qwen2.5-14B | 56GB | ❌ No |
+| Model | F32 VRAM per GPU | Custom NF4 VRAM | Fits on single K80? |
+|-------|------------------|-----------------|---------------------|
+| Qwen2.5-0.5B | 2GB | ~0.3GB | ✅ Yes |
+| Qwen2.5-1.5B | 6GB | ~0.9GB | ✅ Yes |
+| Qwen2.5-3B | 12GB | ~1.8GB | ✅ Yes |
+| Qwen2.5-7B | 28GB | ~4GB | ✅ Yes (with NF4 kernels) |
+| Qwen2.5-14B | 56GB | ~8GB | ✅ Yes (tight, with NF4 kernels) |
 
-**Current workaround**: FP16 storage + FP32 compute reduces load time but NOT training VRAM (gradients + optimizer states are FP32 regardless). For 7B+ training, use multi-GPU DDP.
-
-**Path to real QLoRA on Kepler**:
-- Write custom NF4-style 4-bit kernels for sm_37 (Phase 2)
-- Based on llama_wukong's proven pattern: FA kernels, AdamW kernel all ported
-- Scope: ~2-3 weeks of focused CUDA work
-- Reward: 7B models on single K80, 14B+ viable
-
-**Priority**: HIGH — but requires custom CUDA implementation.
+**Priority**: HIGH — kernel code done, integration in progress.
 
 ---
 
@@ -180,32 +179,37 @@ NUMA0 (Socket 0)                    NUMA1 (Socket 1)
 
 ---
 
-### P0-alt: Custom NF4 Kernels for Kepler sm_37 ("MAKE it work")
+### P0-alt: Custom NF4 Kernels for Kepler sm_37 — PHASE 1-2 COMPLETE ✅
 
-**What**: Write our own 4-bit quantization kernels targeting sm_37, bypassing bitsandbytes entirely.
+**What**: Our own 4-bit quantization kernels targeting sm_37, bypassing bitsandbytes entirely.
 
-**Scope**:
-1. **NF4-style quantization**: Distribution-aware 4-bit quantization (match QLoRA paper)
-2. **Dequantize kernel**: CUDA kernel that dequantizes 4-bit weights to FP32 for compute
-3. **4-bit matmul kernel**: Fused dequantize+matmul using legacy cuBLAS Sgemm (no Ex APIs)
-4. **Linear4bit layer**: Drop-in replacement for torch.nn.Linear
-5. **Gradient path**: Handle gradient computation through quantized weights
-6. **Integration**: Plug into `transformers_backend.py` as a new `model_precision="custom_nf4"` mode
+**Completed**:
+1. ✅ **NF4-style quantization**: Distribution-aware 4-bit quantization (official bitsandbytes codebook)
+2. ✅ **Dequantize kernel**: CUDA kernel validated on Kepler (max diff = 0 vs CPU reference)
+3. ✅ **Fused dequantize+matmul**: Via PyTorch mm/cuBLAS Sgemm, tested and working
+4. ⬜ **LinearNF4 layer**: Drop-in torch.nn.Linear replacement (next)
+5. ⬜ **Gradient path**: Straight-through estimator ready, needs integration
+6. ⬜ **Integration**: Plug into `transformers_backend.py`
 
-**Based on**: llama_wukong's proven pattern — FA tile kernels and AdamW GPU kernel both ported for sm_37.
+**Files**: `python/kernels/nf4_dequant.cu`, `nf4_cuda.py`, `nf4_kepler.py`
 
-**Expected result**:
+**Build requirements**:
+- GCC 11 required (GCC 12 breaks nvcc for CUDA 11.8)
+- Target: `-arch=sm_37`
+
+**Known Kepler quirks** (see AGENTS.md):
+- Ternary ops with `==` caused silent wrong results → use if/else
+- Process packed bytes (both nibbles together), not element-wise
+- Standard grid stride pattern for thread indexing
+
+**Remaining effort**: ~1 week (integration, LinearNF4 layer, end-to-end test)
+
+**Expected result** (updated with measured compression):
 | Model | Custom NF4 VRAM | Fits on single K80? |
 |-------|-----------------|---------------------|
-| Qwen2.5-7B | ~3.5GB | ✅ Yes |
-| Qwen2.5-14B | ~7GB | ✅ Yes (tight) |
+| Qwen2.5-7B | ~4GB | ✅ Yes |
+| Qwen2.5-14B | ~8GB | ✅ Yes (tight) |
 | Qwen2.5-32B | ~16GB | ❌ Needs multi-GPU |
-
-**Effort**: ~2-3 weeks of focused CUDA development + testing.
-
-**Risk**: Medium. Kepler's lack of certain instructions (e.g., no native 4-bit ops) means we'd use lookup tables for NF4 dequantization, similar to the original QLoRA implementation.
-
-**Decision**: This is the "MAKE it support Kepler" work. Worth it if we want single-GPU 7B training.
 
 ### P1: Worker Auto-Spawn
 
@@ -331,10 +335,10 @@ if resume_path:
 | 3B | F32 LoRA | 2 (FSDP) | Same NUMA | ~6GB each → ✅ | Needs FSDP impl |
 | 7B | F32 LoRA | 4 (DDP) | Split NUMA | ~14GB each → ❌ | OOM on K80 |
 | 7B | F32 LoRA | 8 (DDP) | Split NUMA0+1 | ~14GB each → ❌ | OOM on K80 |
-| 7B | Custom NF4 LoRA | 1 | Any NUMA | ~5-6GB | ⏳ Phase 2 (custom CUDA) |
-| 7B | Custom NF4 LoRA | 8 (DDP) | Split NUMA0+1 | ~5-6GB each | ⏳ Phase 2 |
-| 14B | Custom NF4 LoRA | 2 (DDP) | Same NUMA | ~10GB each → ✅ tight | ⏳ Phase 2 |
-| 14B | Custom NF4 LoRA | 8 (DDP) | Split NUMA0+1 | ~5-6GB each → ✅ | ⏳ Phase 2 |
+| 7B | Custom NF4 LoRA | 1 | Any NUMA | ~4-6GB | ⏳ Phase 2 (integration) |
+| 7B | Custom NF4 LoRA | 8 (DDP) | Split NUMA0+1 | ~4-6GB each | ⏳ Phase 2 |
+| 14B | Custom NF4 LoRA | 2 (DDP) | Same NUMA | ~8-10GB each → ✅ tight | ⏳ Phase 2 |
+| 14B | Custom NF4 LoRA | 8 (DDP) | Split NUMA0+1 | ~4-6GB each → ✅ | ⏳ Phase 2 |
 | 32B | Custom NF4+FSDP | 8 | Split NUMA0+1 | ~5-6GB each → ✅ | ⏳ Phase 2+
 | 72B | Custom NF4+FSDP | 8 | Split NUMA0+1 | ~9-10GB each → ✅ tight | ⏳ Phase 2+ |
 
