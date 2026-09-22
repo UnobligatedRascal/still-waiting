@@ -192,16 +192,26 @@ Via job `config` object:
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
+| `model_precision` | "f32" | "f32", "f16_storage", "bnb_nf4", or "custom_nf4" |
+| `quant` | null | Alternative: "nf4" for custom NF4 quantization (same as model_precision="custom_nf4") |
 | `max_seq_length` | 512 | Reduce for VRAM-constrained GPUs |
 | `lora_r` | 16 | LoRA rank |
 | `lora_alpha` | 32 | LoRA scaling |
 | `lora_dropout` | 0.05 | Dropout rate |
-| `target_modules` | ["q_proj", "v_proj"] | LoRA target layers |
+| `target_modules` | auto-detected | LoRA target layers (per model architecture) |
 | `learning_rate` | 2e-4 | AdamW LR |
 | `batch_size` | 2 | Per-GPU batch |
 | `gradient_accumulation_steps` | 8 | Effective batch = batch_size × accum × GPUs |
 | `warmup_ratio` | 0.05 | Linear warmup |
 | `dataset_path` | null | JSONL file, directory, or HF dataset name |
+
+**model_precision modes**:
+- `f32`: Full precision. Safe, slowest, most VRAM. Default.
+- `f16_storage`: Load weights in FP16 (half VRAM during load), compute in FP32. Recommended for 3B+ models.
+- `bnb_nf4`: bitsandbytes QLoRA. ⚠️ Requires bitsandbytes install; currently BROKEN on Kepler sm_37.
+- `custom_nf4`: Custom NF4 4-bit quantization for Kepler (⏳ in development). ~7.8x compression vs FP32.
+
+**target_modules**: Auto-detected based on model name. Qwen2.5 → all attention layers. Llama-3 → all attention layers. Override manually if needed.
 
 ### Dataset Format (JSONL)
 

@@ -1,4 +1,4 @@
-use crate::state::{AppState, JobStatus, TrainingJob};
+use crate::state::{AppState, JobStatus, TrainingJob, LogLevel, LogEntry};
 use anyhow::Result;
 use axum::{
     extract::{Path, State, Json},
@@ -74,6 +74,8 @@ pub fn routes(state: AppState) -> Router {
         .route("/v1/training/jobs/:id/resume", post(resume_job))
         .route("/v1/training/jobs/:id/checkpoint", post(report_checkpoint))
         .route("/v1/training/jobs/:id/conductor", post(conductor_feedback))
+        .route("/v1/training/jobs/:id/logs", post(report_log))
+        .route("/v1/training/jobs/:id/logs", get(get_logs))
         .route("/v1/training/jobs/:id/complete", post(complete_job))
         .route("/v1/training/jobs/:id/fail", post(fail_job))
         // Models list
@@ -312,4 +314,67 @@ async fn list_models(
         "object": "list",
         "data": models
     }))
+}
+
+#[derive(Deserialize)]
+pub struct LogRequest {
+    pub level: Option<String>,
+    pub message: String,
+    pub step: Option<u64>,
+}
+
+async fn report_log(
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+    Json(req): Json<LogRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let level = match req.level.as_deref() {
+        Some("WARN") | Some("WARNING") => LogLevel::WARN,
+        Some("ERROR") => LogLevel::ERROR,
+        Some("DEBUG") => LogLevel::DEBUG,
+        _ => LogLevel::INFO,
+    };
+    let entry = LogEntry {
+        timestamp: chrono::Utc::now(),
+        level,
+        message: req.message,
+        step: req.step,
+    };
+    state.add_log(&job_id, entry).await;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+pub struct GetLogsQuery {
+    #[serde(default)]
+    pub from: usize,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+fn default_limit() -> usize {
+    200
+}
+
+async fn get_logs(
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+    axum::extract::Query(query): axum::extract::Query<GetLogsQuery>,
+) -> Result<JsonResponse<LogsResponse>, StatusCode> {
+    let logs = state.get_logs(&job_id, query.from, query.limit).await;
+    let total = state.log_count(&job_id).await;
+    Ok(JsonResponse(LogsResponse {
+        logs,
+        total,
+        from: query.from,
+        limit: query.limit,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct LogsResponse {
+    pub logs: Vec<LogEntry>,
+    pub total: usize,
+    pub from: usize,
+    pub limit: usize,
 }

@@ -5,6 +5,25 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Log level for training job logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum LogLevel {
+    INFO,
+    WARN,
+    ERROR,
+    DEBUG,
+}
+
+/// A single log entry from a training job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp: DateTime<Utc>,
+    pub level: LogLevel,
+    pub message: String,
+    pub step: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -56,10 +75,17 @@ pub struct ModelEntry {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AppState {
     pub jobs: Arc<RwLock<HashMap<Uuid, TrainingJob>>>,
     pub models: Arc<RwLock<HashMap<Uuid, ModelEntry>>>,
+    pub logs: Arc<RwLock<HashMap<Uuid, Vec<LogEntry>>>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AppState {
@@ -67,6 +93,7 @@ impl AppState {
         Self {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             models: Arc::new(RwLock::new(HashMap::new())),
+            logs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -76,5 +103,33 @@ impl AppState {
 
     pub async fn list_jobs(&self) -> Vec<TrainingJob> {
         self.jobs.read().await.values().cloned().collect()
+    }
+
+    /// Add a log entry to a job. Keeps max 5000 entries per job.
+    pub async fn add_log(&self, job_id: &Uuid, entry: LogEntry) {
+        let mut logs = self.logs.write().await;
+        let entries = logs.entry(*job_id).or_insert_with(Vec::new);
+        entries.push(entry);
+        if entries.len() > 5000 {
+            entries.drain(..entries.len() - 5000);
+        }
+    }
+
+    /// Get logs for a job with optional pagination.
+    pub async fn get_logs(&self, job_id: &Uuid, from: usize, limit: usize) -> Vec<LogEntry> {
+        let logs = self.logs.read().await;
+        let entries = match logs.get(job_id) {
+            Some(e) => e,
+            None => return vec![],
+        };
+        let from = from.min(entries.len());
+        let to = (from + limit).min(entries.len());
+        entries[from..to].to_vec()
+    }
+
+    /// Get log count for a job.
+    pub async fn log_count(&self, job_id: &Uuid) -> usize {
+        let logs = self.logs.read().await;
+        logs.get(job_id).map_or(0, |e| e.len())
     }
 }

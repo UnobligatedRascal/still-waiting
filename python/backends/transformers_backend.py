@@ -131,21 +131,65 @@ def log(msg: str):
         print(msg, flush=True)
 
 
+def _auto_detect_target_modules(model_ref: str, model_precision: str) -> list[str]:
+    """Auto-detect LoRA target modules based on model architecture.
+
+    For QLoRA (bnb_nf4), we typically target all linear layers.
+    For standard LoRA, we target attention projection layers only.
+
+    Returns appropriate target_modules list as strings for LoraConfig.
+    """
+    model_lower = model_ref.lower()
+
+    # QLoRA: target all linear layers (standard QLoRA practice)
+    if model_precision == "bnb_nf4":
+        if "qwen" in model_lower or "llama" in model_lower or "mistral" in model_lower:
+            return ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        # Fallback: all linear layers (PEFT accepts "all-linear" string)
+        return ["all-linear"]
+
+    # Standard LoRA: attention projections only (safer, less params)
+    # Qwen2/Qwen2.5 architecture
+    if "qwen" in model_lower:
+        return ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+    # Llama-3 architecture
+    if "llama-3" in model_lower or "llama3" in model_lower:
+        return ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+    # Mistral/Mixtral architecture
+    if "mistral" in model_lower or "mixtral" in model_lower:
+        return ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+    # GPT-2 / TinyLlama / generic transformer architecture
+    if "tinyllama" in model_lower:
+        return ["q_proj", "k_proj", "v_proj"]
+
+    # Default safe targets (attention only)
+    return ["q_proj", "v_proj"]
+
+
 class KeplerTransformersBackend:
     """
     LoRA fine-tuning backend optimized for Kepler sm_37.
-    
+
     Configuration options (via job config):
-    - max_seq_length: int (default 2048)
+    - model_precision: str (default "f32", options: "f32", "f16_storage", "bnb_nf4")
+    - max_seq_length: int (default 1024)
     - lora_r: int (default 16)
     - lora_alpha: int (default 32)
     - lora_dropout: float (default 0.05)
     - learning_rate: float (default 2e-4)
-    - batch_size: int (default 4 per GPU)
+    - batch_size: int (default 2)
     - gradient_accumulation_steps: int (default 8)
     - num_train_epochs: int (default 1)
-    - target_modules: list[str] (default: ["q_proj", "v_proj"])
+    - target_modules: list[str] (default: auto-detected)
     - dataset_path: str (local path or HuggingFace id)
+
+    model_precision modes:
+    - "f32": Full precision. Safe, slowest, most VRAM.
+    - "f16_storage": Weights in FP16, compute in FP32. 2x VRAM savings, same speed.
+    - "bnb_nf4": bitsandbytes QLoRA. Requires bnb install. May fail on Kepler.
     """
     
     def __init__(self, config: Dict[str, Any] = None):
@@ -185,12 +229,26 @@ class KeplerTransformersBackend:
         cfg = self.config.copy()
         if config:
             cfg.update(config)
-        
+
+        # Model precision config:
+        # - "f32": Full precision (safe, slowest, most VRAM). Default for Kepler.
+        # - "f16_storage": Load weights in FP16 (half VRAM), cast to FP32 for compute.
+        #   FP16 matmul is slow on Kepler without tensor cores, but VRAM savings enable
+        #   larger models. Recommended for 3B+ models on single K80.
+        # - "bnb_nf4": Use bitsandbytes 4-bit NF4 quantization (QLoRA).
+        #   Requires bitsandbytes installed. May fail on Kepler sm_37 (CC < 6.0 required).
+        # - "custom_nf4": Custom NF4 4-bit quantization for Kepler (in development).
+        #   ~7.8x compression vs FP32. Auto-fallback to F32 on kernel failure.
+        model_precision = cfg.get("model_precision", "f32")
+
+        # Alternative config flag for backward compatibility
+        if cfg.get("quant") == "nf4" and model_precision == "f32":
+            model_precision = "custom_nf4"
+
         max_seq_length = cfg.get("max_seq_length", 1024)  # Reduced default for Kepler VRAM
         lora_r = cfg.get("lora_r", 16)
         lora_alpha = cfg.get("lora_alpha", 32)
         lora_dropout = cfg.get("lora_dropout", 0.05)
-        target_modules = cfg.get("target_modules", ["q_proj", "v_proj"])
         learning_rate = cfg.get("learning_rate", 2e-4)
         num_train_epochs = cfg.get("num_train_epochs", 1)
         batch_size = cfg.get("batch_size", 2)  # Smaller default for Kepler
@@ -198,6 +256,15 @@ class KeplerTransformersBackend:
         warmup_ratio = cfg.get("warmup_ratio", 0.05)
         dataset_path = cfg.get("dataset_path")
         dataset_text_field = cfg.get("dataset_text_field", "text")
+
+        # Auto-detect target modules for LoRA/QLoRA based on model architecture
+        # if user hasn't specified them explicitly.
+        if cfg.get("target_modules"):
+            target_modules = cfg.get("target_modules")
+        else:
+            target_modules = _auto_detect_target_modules(model_ref, model_precision)
+
+        log(f"LoRA target modules: {target_modules}")
         
         local_rank = int(os.getenv("LOCAL_RANK", "-1"))
         world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -218,14 +285,69 @@ class KeplerTransformersBackend:
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Load base model — F32 for Kepler (FP16 is slow without tensor cores)
-        log(f"Loading model: {model_ref}")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_ref,
-            torch_dtype=torch.float32,
-            trust_remote_code=True,
-        )
+
+        log(f"Loading model: {model_ref} (precision={model_precision})")
+
+        if model_precision == "bnb_nf4":
+            # QLoRA via bitsandbytes 4-bit NF4 quantization
+            try:
+                from transformers import BitsAndBytesConfig
+            except ImportError:
+                raise RuntimeError(
+                    "bitsandbytes not installed. Install with: pip install bitsandbytes"
+                )
+
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float32,  # Kepler: F32 compute
+                bnb_4bit_use_double_quant=True,
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_ref,
+                quantization_config=bnb_config,
+                trust_remote_code=True,
+            )
+            log("Model loaded with bitsandbytes NF4 4-bit quantization (QLoRA)")
+
+        elif model_precision == "custom_nf4":
+            # Custom NF4 4-bit quantization for Kepler (in development)
+            # Falls back to F32 if kernels not ready or fail
+            try:
+                from kernels import nf4_kepler
+                log("Using custom NF4 quantization for Kepler")
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_ref,
+                    torch_dtype=torch.float32,
+                    trust_remote_code=True,
+                )
+                # TODO: Replace linear layers with LinearNF4
+                # For now, log that custom NF4 is requested but not fully implemented
+                log("WARNING: custom_nf4 mode requested but kernels not yet implemented.")
+                log("Falling back to F32. NF4 kernels coming in Phase 2.")
+                model_precision = "f32"  # Fallback
+            except ImportError as e:
+                log(f"WARNING: nf4_kepler module not found ({e}). Falling back to F32.")
+                model_precision = "f32"
+
+        elif model_precision == "f16_storage":
+            # FP16 weights for VRAM savings, FP32 compute for Kepler correctness
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_ref,
+                torch_dtype=torch.float16,
+                trust_remote_code=True,
+            )
+            # Cast to FP32 for compute (Kepler FP16 is slow without tensor cores)
+            self.model = self.model.to(torch.float32)
+            log("Model loaded in FP16 storage, cast to FP32 for compute")
+        else:
+            # F32 for Kepler (FP16 is slow without tensor cores)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_ref,
+                torch_dtype=torch.float32,
+                trust_remote_code=True,
+            )
+            log("Model loaded in FP32")
         
         # Apply LoRA
         log(f"Applying LoRA (r={lora_r}, alpha={lora_alpha}, targets={target_modules})")

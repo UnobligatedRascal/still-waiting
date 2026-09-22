@@ -4,6 +4,7 @@ import JobForm from './components/JobForm'
 import StatusBanner from './components/StatusBanner'
 import SystemStatus from './components/SystemStatus'
 import LossChart from './components/LossChart'
+import LogPane from './components/LogPane'
 
 const ORCH_URL = import.meta.env.VITE_ORCH_URL || '/v1'
 
@@ -337,6 +338,11 @@ function JobDetail({ job, onClose, onRefresh, getStatusPillClass }) {
             </div>
           </div>
         )}
+
+        {/* Live logs */}
+        <div className="mt-4">
+          <LogPane jobId={job.id} />
+        </div>
 
         {/* Actions */}
         <div className="mt-4 flex gap-2">
