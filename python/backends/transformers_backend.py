@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import get_linear_schedule_with_warmup
 import datasets
 
 # Transformers + PEFT
@@ -30,6 +29,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    get_linear_schedule_with_warmup,
 )
 # Custom LoRA wrapper for NF4 — no PEFT dependency needed
 # PEFT doesn't support custom LinearNF4 without VRAM-expensive dummy weights
