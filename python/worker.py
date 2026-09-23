@@ -17,10 +17,22 @@ from typing import Any, Dict, Optional
 
 # Configuration
 CHECKPOINT_EVERY = int(os.getenv("CHECKPOINT_EVERY", "2048"))
-CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/data/checkpoints")  # Base directory for checkpoints
 ORCH_URL = os.getenv("ORCH_URL", "http://localhost:9999")
 NUMA_NODE = int(os.getenv("NUMA_NODE", "0"))  # Worker's NUMA domain
 GPUS_PER_NUMA = 4  # NUMA0=GPU0-3, NUMA1=GPU4-7
+
+# Checkpoint directory (auto-resolves to writable path)
+try:
+    from checkpoints import get_checkpoint_dir
+except ImportError:
+    # Fallback if checkpoints module not available
+    def get_checkpoint_dir():
+        import os, pathlib
+        path = pathlib.Path(os.getenv("CHECKPOINT_DIR", "/home/whistler/still-waiting/python/checkpoints"))
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+CHECKPOINT_DIR = get_checkpoint_dir()
 
 # Backend imports
 from backends.transformers_backend import KeplerTransformersBackend
