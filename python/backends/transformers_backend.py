@@ -17,10 +17,8 @@ UnobligatedRascal — Making old hardware sing.
 import os
 import gc
 import json
-import math
-import random
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.optim import AdamW
@@ -260,8 +258,14 @@ class KeplerTransformersBackend:
 
         # Auto-detect target modules for LoRA/QLoRA based on model architecture
         # if user hasn't specified them explicitly.
-        if cfg.get("target_modules"):
-            target_modules = cfg.get("target_modules")
+        # Handle both list and comma-separated string (GUI sends string).
+        raw_targets = cfg.get("target_modules")
+        if isinstance(raw_targets, str) and "," in raw_targets:
+            target_modules = [t.strip() for t in raw_targets.split(",") if t.strip()]
+        elif isinstance(raw_targets, str):
+            target_modules = [raw_targets]
+        elif isinstance(raw_targets, list):
+            target_modules = raw_targets
         else:
             target_modules = _auto_detect_target_modules(model_ref, model_precision)
 
@@ -601,12 +605,32 @@ class KeplerTransformersBackend:
         return {"loss": accumulated_loss / max(samples_processed, 1), "lr": 0.0, "step": self.step_count}
     
     def save_checkpoint(self, step: int, path: str):
-        """Save model checkpoint."""
-        model_to_save = self.model.module if isinstance(self.model, DDP) else self.model
-        model_to_save.save_pretrained(path)
+        """Save model checkpoint with optimizer and scheduler state for resume.
         
-        # Save tokenizer separately (it's shared)
-        # tokenizer.save_pretrained(path)  # Only once, not every checkpoint
+        Uses safetensors for security and size efficiency.
+        Saves optimizer state and scheduler state for mid-training resume.
+        """
+        model_to_save = self.model.module if isinstance(self.model, DDP) else self.model
+        
+        # Save model weights (safetensors by default)
+        model_to_save.save_pretrained(path, safe_serialization=True)
+        
+        # Save optimizer state (for resume)
+        opt_path = os.path.join(path, "optimizer.pt")
+        torch.save(self.optimizer.state_dict(), opt_path)
+        
+        # Save scheduler state (for resume)
+        sched_path = os.path.join(path, "scheduler.pt")
+        torch.save(self.scheduler.state_dict(), sched_path)
+        
+        # Save training metadata
+        meta = {
+            "step": step,
+            "step_count": self.step_count,
+        }
+        meta_path = os.path.join(path, "training_meta.json")
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
         
         # Force CUDA cache clear after checkpoint (Kepler has limited VRAM)
         gc.collect()

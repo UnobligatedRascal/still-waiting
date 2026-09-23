@@ -19,15 +19,16 @@ TODO:
 - [x] Generate NF4 codebook (16 values, distribution-aware)
 - [x] Quantize/dequantize functions (CPU reference implementation)
 - [x] CUDA kernel: dequantize 4-bit block → FP32 tensor (nf4_dequant.cu)
-- [x] CUDA kernel: fused dequantize + matmul using cuBLAS Sgemm (nf4_dequant.cu)
+- [x] CUDA kernel: dequantize + matmul using cuBLAS Sgemm via torch.mm (nf4_dequant.cu)
 - [x] PyTorch autograd function for gradient computation (nf4_cuda.py)
 - [x] LinearNF4 layer (torch.nn.Module, from_linear factory, CUDA forward)
 - [x] Layer replacement pass (replace_linear_with_nf4, target_modules filter)
-- [ ] Integration into transformers_backend.py
+- [x] Integration into transformers_backend.py
 - [ ] NF4 checkpoint save/load (packed weights + scales format)
 
 Integration notes:
 - Config flag: "quant": "nf4" in job config → worker routes to NF4 path
+- Config flag: model_precision="custom_nf4" → load FP32 → NF4 replace → LoRA wrap
 - Checkpoints: Store packed NF4 + scales; support materializing FP32 for surgical edits
 - Optimizer: Consider CPU-offloaded Adam moments for extra VRAM savings
 - Reporting: Surface compression ratio to orchestrator metrics
@@ -36,9 +37,6 @@ Integration notes:
 UnobligatedRascal — Making old hardware sing.
 """
 
-import math
-from typing import Any
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -46,76 +44,12 @@ import torch.nn as nn
 from .nf4_cuda import nf4_linear_forward as _nf4_linear_cuda
 
 
-def generate_nf4_codebook() -> tuple[np.ndarray, Any]:
-    """
-    Generate NF4 codebook: 16 values optimized for normal distributions.
-
-    NF4 uses two Gaussian mixtures to place codebook values where
-    they're most useful for weight distributions.
-
-    Returns:
-        (codebook, F): codebook of 16 values, F for quantization math
-    """
-    # NF4 uses two Gaussian distributions:
-    # N(μ₁, σ₁²) with weight m₁ and N(μ₂, σ₂²) with weight m₂
-    # Optimized parameters from QLoRA paper
-    m1, m2 = 0.68268945, 1 - 0.68268945
-    mu1, mu2 = -0.3550504, 0.3550504
-    sigma1, sigma2 = 0.3228877, 0.1599543
-
-    # Generate inverse CDF samples
-    # For each of the 16 codebook values, find the x such that
-    # CDF(x) = i/16 for i in [1, 17)
-    probs = np.linspace(1 / 16, 15 / 16, 16)
-
-    # NF4 codebook is the inverse CDF of the mixture Gaussian
-    # We approximate using binary search on the CDF
-    codebook = np.zeros(16)
-    for i, p in enumerate(probs):
-        codebook[i] = _inverse_cdf(p, m1, mu1, sigma1, m2, mu2, sigma2)
-
-    return codebook, None
-
-
-# Official NF4 codebook from bitsandbytes (reference values)
-# Used for validation against our implementation
+# Official NF4 codebook from bitsandbytes (reference values).
+# This is THE codebook — all quantization/dequantization uses these values.
 OFFICIAL_NF4_CODEBOOK = np.array([
     -1.0, -0.6965, -0.5246, -0.3949, -0.291, -0.2065, -0.1365, -0.0785,
     -0.0297, 0.0126, 0.051, 0.086, 0.1195, 0.1539, 0.191, 0.2341
 ])
-
-
-def _gaussian_pdf(x: float, mu: float, sigma: float) -> float:
-    """Standard Gaussian PDF."""
-    return np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2 * np.pi))
-
-
-def _gaussian_cdf(x: float, mu: float, sigma: float) -> float:
-    """Standard Gaussian CDF using error function."""
-    return 0.5 * (1 + math.erf((x - mu) / (sigma * np.sqrt(2))))
-
-
-def _mixture_cdf(x: float, m1: float, mu1: float, sigma1: float,
-                 m2: float, mu2: float, sigma2: float) -> float:
-    """CDF of mixture Gaussian."""
-    return m1 * _gaussian_cdf(x, mu1, sigma1) + m2 * _gaussian_cdf(x, mu2, sigma2)
-
-
-def _inverse_cdf(p: float, m1: float, mu1: float, sigma1: float,
-                 m2: float, mu2: float, sigma2: float) -> float:
-    """
-    Inverse CDF of mixture Gaussian via binary search.
-    Find x such that mixture_cdf(x) = p.
-    """
-    low, high = -3.0, 3.0
-    for _ in range(60):  # Sufficient precision
-        mid = (low + high) / 2
-        cdf = _mixture_cdf(mid, m1, mu1, sigma1, m2, mu2, sigma2)
-        if cdf < p:
-            low = mid
-        else:
-            high = mid
-    return (low + high) / 2
 
 
 def quantize_to_nf4(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -156,10 +90,20 @@ def quantize_to_nf4(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, t
     # Shape: (n_blocks, BLOCK_SIZE)
     scaled = weight_blocks / scales.unsqueeze(1)
 
-    # Find nearest codebook index for each element
-    # Distance to each codebook value: (n_blocks, BLOCK_SIZE, 16)
-    distances = (scaled.unsqueeze(2) - NF4_CODEBOOK.unsqueeze(0).unsqueeze(0)).abs()
-    indices = distances.argmin(dim=2)  # (n_blocks, BLOCK_SIZE), values in [0, 15]
+    # Find nearest codebook index using searchsorted (codebook is sorted).
+    # searchsorted returns insertion point; we check neighbors to find closest.
+    # This is O(n×4) instead of O(n×16) broadcast — much faster for large weights.
+    insert_points = torch.searchsorted(NF4_CODEBOOK, scaled)
+    # Check left neighbor
+    left_indices = torch.clamp(insert_points - 1, 0, 15)
+    left_values = NF4_CODEBOOK[left_indices]
+    # Check right neighbor (insert point)
+    right_indices = torch.clamp(insert_points, 0, 15)
+    right_values = NF4_CODEBOOK[right_indices]
+    # Pick whichever is closer
+    left_dist = (scaled - left_values).abs()
+    right_dist = (scaled - right_values).abs()
+    indices = torch.where(left_dist <= right_dist, left_indices, right_indices)
 
     # Pack two 4-bit indices per byte
     # High nibble: indices[:, ::2], Low nibble: indices[:, 1::2]
@@ -424,12 +368,15 @@ def replace_linear_with_nf4(
         setattr(parent, name, nf4_layer)
         replaced_count += 1
 
+    # Pre-compute module dict for O(1) parent lookups
+    module_dict = dict(model.named_modules())
+
     # Walk model and replace
     for name, module in model.named_modules():
         # Find parent and child name
         if '.' in name:
             parent_name, child_name = name.rsplit('.', 1)
-            parent = dict(model.named_modules())[parent_name]
+            parent = module_dict[parent_name]
         else:
             parent = model
             child_name = name
@@ -629,19 +576,11 @@ def log_vram(msg: str = "", device: int | None = 0) -> None:
           f"({info['free_gb']:.2f}GB free)")
 
 
-# Test codebook generation
+# Quick self-test
 if __name__ == "__main__":
-    print("=== NF4 Codebook Generation ===")
-    codebook, _ = generate_nf4_codebook()
-    print("Generated codebook:", codebook)
-    print("Min:", codebook.min(), "Max:", codebook.max())
-    print("Mean:", codebook.mean())
+    print("=== NF4 Quantize/Dequantize Test ===")
+    print(f"Using official bitsandbytes NF4 codebook: {OFFICIAL_NF4_CODEBOOK}")
 
-    print("\nOfficial bitsandbytes NF4:", OFFICIAL_NF4_CODEBOOK)
-    print("Difference (L2):", np.abs(codebook - OFFICIAL_NF4_CODEBOOK).mean())
-    print("Note: Differences are expected — NF4 parameters may vary")
-
-    print("\n=== Quantize/Dequantize Test ===")
     torch.manual_seed(42)
     w = torch.randn(128, 256)  # Small test tensor
     quantized, scales, cb = quantize_to_nf4(w)
@@ -650,7 +589,7 @@ if __name__ == "__main__":
     # Trim padding if any
     w_reconstructed = w_reconstructed[:w.numel()].reshape(w.shape)
 
-    print(f"Original shape: {w.shape}")
+    print(f"\nOriginal shape: {w.shape}")
     print(f"Quantized bytes: {quantized.numel() + scales.numel()}")
     print(f"Original bytes: {w.numel() * 4}")
     print(f"Compression: {w.numel() * 4 / (quantized.numel() + scales.numel()):.2f}x")

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useMemo } from 'react'
 import { createChart } from 'lightweight-charts'
 
 /*
@@ -18,8 +18,17 @@ export default function LossChart({ checkpoints, autoRefresh = true }) {
   const seriesRef = useRef(null)
   const [error, setError] = useState(null)
 
-  // Convert checkpoints to chart data points
-  const data = useMemoizedChartData(checkpoints)
+  // Convert checkpoints to chart data points (memoized per component instance)
+  const data = useMemo(() => {
+    if (!checkpoints || checkpoints.length === 0) return []
+    return checkpoints
+      .filter((cp) => cp.metrics?.loss != null)
+      .map((cp, i) => ({
+        time: i,
+        value: parseFloat(cp.metrics.loss),
+        step: cp.step,
+      }))
+  }, [checkpoints])
 
   // Initialize chart
   useEffect(() => {
@@ -135,23 +144,4 @@ export default function LossChart({ checkpoints, autoRefresh = true }) {
   )
 }
 
-// Module-level cache for chart data
-let _chartCache = { key: null, data: [] }
 
-function useMemoizedChartData(checkpoints) {
-  if (!checkpoints || checkpoints.length === 0) return []
-
-  const key = `${checkpoints.length}-${checkpoints[checkpoints.length - 1]?.step}-${checkpoints[checkpoints.length - 1]?.metrics?.loss}`
-  if (_chartCache.key === key) return _chartCache.data
-
-  const newData = checkpoints
-    .filter((cp) => cp.metrics?.loss != null)
-    .map((cp, i) => ({
-      time: i,
-      value: parseFloat(cp.metrics.loss),
-      step: cp.step,
-    }))
-
-  _chartCache = { key, data: newData }
-  return newData
-}

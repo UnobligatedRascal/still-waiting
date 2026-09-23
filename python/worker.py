@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 # Configuration
 CHECKPOINT_EVERY = int(os.getenv("CHECKPOINT_EVERY", "2048"))
+CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/data/checkpoints")  # Base directory for checkpoints
 ORCH_URL = os.getenv("ORCH_URL", "http://localhost:9999")
 NUMA_NODE = int(os.getenv("NUMA_NODE", "0"))  # Worker's NUMA domain
 GPUS_PER_NUMA = 4  # NUMA0=GPU0-3, NUMA1=GPU4-7
@@ -188,7 +189,7 @@ def run_job(job_id: str, job_config: Dict[str, Any]):
             
             # Checkpoint
             if current_step % CHECKPOINT_EVERY == 0:
-                ckpt_path = f"/data/checkpoints/{job_id}/step_{current_step}"
+                ckpt_path = f"{CHECKPOINT_DIR}/{job_id}/step_{current_step}"
                 os.makedirs(ckpt_path, exist_ok=True)
                 backend.save_checkpoint(current_step, ckpt_path)
                 notify_orchestrator(job_id, current_step, ckpt_path, metrics)
@@ -249,8 +250,8 @@ def main():
         torch.distributed.init_process_group(backend="nccl")
     
     local_rank = get_local_rank()
-    send_log(job_id, "INFO", f"Worker started: LOCAL_RANK={local_rank}, WORLD_SIZE={get_world_size()}, NUMA={NUMA_NODE}"), {
-    
+    send_log(job_id, "INFO", f"Worker started: LOCAL_RANK={local_rank}, WORLD_SIZE={get_world_size()}, NUMA={NUMA_NODE}")
+
     run_job(job_id, job_config)
 
 if __name__ == "__main__":
