@@ -52,14 +52,26 @@ def log(msg: str):
     print(f"[test] {msg}", flush=True)
 
 
-def log_vram(gpu: int = 0):
+def log_vram(gpu: int = 0, label: str = ""):
     if not torch.cuda.is_available():
         return
     total = torch.cuda.get_device_properties(gpu).total_memory
     allocated = torch.cuda.memory_allocated(gpu)
-    free = total - torch.cuda.memory_reserved(gpu)
-    log(f"VRAM GPU{gpu}: {allocated/1024**3:.2f}GB / {total/1024**3:.1f}GB "
-        f"({free/1024**3:.2f}GB free)")
+    reserved = torch.cuda.memory_reserved(gpu)
+    free = total - reserved
+    prefix = f"[{label}] " if label else ""
+    log(f"VRAM GPU{gpu}: {prefix}allocated={allocated/1024**3:.2f}GB, "
+        f"reserved={reserved/1024**3:.2f}GB, free={free/1024**3:.2f}GB/{total/1024**3:.1f}GB "
+        f"({100*free/total:.0f}% free)")
+
+
+def log_peak_vram(gpu: int = 0):
+    if not torch.cuda.is_available():
+        return
+    peak_alloc = torch.cuda.max_memory_allocated(gpu)
+    peak_reserved = torch.cuda.max_memory_reserved(gpu)
+    log(f"PEAK VRAM GPU{gpu}: alloc={peak_alloc/1024**3:.2f}GB, "
+        f"reserved={peak_reserved/1024**3:.2f}GB")
 
 
 # ============================================================
@@ -328,10 +340,11 @@ def test_model_nf4(model_name: str):
 
     import torch.nn as nn
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from kernels.nf4_kepler import replace_linear_with_nf4, LinearNF4, get_vram_info
+    from kernels.nf4_kepler import replace_linear_with_nf4
 
-    log_vram()
+    log_vram(label="START")
     clear_cache()
+    torch.cuda.reset_peak_memory_stats()  # Reset peak tracking
 
     # Load model
     log(f"Loading model: {model_name}")
@@ -343,7 +356,7 @@ def test_model_nf4(model_name: str):
         low_cpu_mem_usage=True,
     )
     log(f"  Loaded in {time.time() - start:.1f}s")
-    log_vram()
+    log_vram(label="after_load_fp32")
 
     # Count Linear layers
     linear_count = sum(1 for m in model.modules() if isinstance(m, nn.Linear))
@@ -356,14 +369,14 @@ def test_model_nf4(model_name: str):
     start = time.time()
     replace_linear_with_nf4(model, target_modules=target_modules, verbose=True)
     log(f"  Replacement took {time.time() - start:.1f}s")
-    log_vram()
+    log_vram(label="after_nf4_replace")
 
     # Move to GPU
     log("Moving model to GPU")
     start = time.time()
     model.to("cuda")
     log(f"  GPU transfer took {time.time() - start:.1f}s")
-    log_vram()
+    log_vram(label="after_gpu_transfer")
 
     # Test inference
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -374,12 +387,17 @@ def test_model_nf4(model_name: str):
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
 
     log("Running inference...")
+    clear_cache()
+    torch.cuda.reset_peak_memory_stats()
+    log_vram(label="before_inference")
+
     with torch.no_grad():
         start = time.time()
         outputs = model(**inputs, labels=inputs["input_ids"])
         log(f"  Loss: {outputs.loss.item():.4f} ({time.time() - start:.2f}s)")
 
-    log_vram()
+    log_vram(label="after_inference")
+    log_peak_vram()
     log("  PASSED")
     return True
 
@@ -396,9 +414,11 @@ def test_model_train(model_name: str, steps: int = 10):
 
     from torch.optim import AdamW
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from kernels.nf4_kepler import replace_linear_with_nf4, apply_lora_to_model, log_vram
+    from kernels.nf4_kepler import replace_linear_with_nf4, apply_lora_to_model
 
+    log_vram(label="START")
     clear_cache()
+    torch.cuda.reset_peak_memory_stats()
 
     # Load model
     log(f"Loading model: {model_name}")
@@ -425,46 +445,62 @@ def test_model_train(model_name: str, steps: int = 10):
     log(f"LoRA params: {len(lora_params)} parameter groups")
     total = sum(p.numel() for p in model.parameters())
     log(f"Parameters: {trainable:,} trainable / {total:,} total ({100*trainable/total:.2f}%)")
-    log_vram()
+    log_vram(label="after_setup")
 
     # Clear cache before training
     clear_cache()
+    log_vram(label="after_clear_cache")
 
     # Simple training loop
     optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=2e-4)
 
     losses = []
+    step_times = []
     for step in range(steps):
         # Dummy batch (single sample, short sequence to save VRAM)
         prompt = f"Training step {step}. This is a test sentence for NF4 training." * 5
         inputs = tokenizer(prompt, truncation=True, max_length=128, return_tensors="pt").to("cuda")
         labels = inputs["input_ids"].clone()
 
-        # Clear cache every few steps
+        # Clear cache every few steps to combat fragmentation
         if step > 0 and step % 5 == 0:
             clear_cache()
 
+        step_start = time.time()
         optimizer.zero_grad()
         outputs = model(**inputs, labels=labels)
         loss = outputs.loss
         loss.backward()
         torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, model.parameters()), max_norm=1.0)
         optimizer.step()
+        step_time = time.time() - step_start
 
         losses.append(loss.item())
+        step_times.append(step_time)
 
-        if step % 2 == 0 or step == steps - 1:
-            log(f"Step {step+1}/{steps}: loss={loss.item():.4f}")
+        # Log every step for first 5, then every 5, then last
+        should_log = (step < 5) or (step % 5 == 0) or (step == steps - 1)
+        if should_log:
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            log(f"Step {step+1:3d}/{steps}: loss={loss.item():.4f}, time={step_time:.2f}s, "
+                f"VRAM_alloc={allocated:.2f}GB")
 
-    if steps % 10 == 0:
-        log_vram()
+    # Final stats
+    log_vram(label="after_training")
+    log_peak_vram()
 
     # Check for NaN
     if any(np.isnan(loss_val) for loss_val in losses):
         log("  FAILED: NaN loss detected")
         return False
 
+    # Check for loss divergence
+    if losses[-1] > losses[0] * 5:
+        log(f"  WARNING: Loss may be diverging (start={losses[0]:.4f}, end={losses[-1]:.4f})")
+
     log(f"Loss range: [{min(losses):.4f}, {max(losses):.4f}]")
+    log(f"Step times: min={min(step_times):.2f}s, max={max(step_times):.2f}s, "
+        f"avg={sum(step_times)/len(step_times):.2f}s")
     log("  PASSED")
     return True
 
