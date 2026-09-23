@@ -546,19 +546,35 @@ class KeplerTransformersBackend:
             dataset_text_field=dataset_text_field,
         )
     
-    def train_step(self) -> Dict[str, float]:
-        """Execute one effective training step (with gradient accumulation). Returns metrics."""
+    def train_epoch(
+        self,
+        step_callback=None,
+    ) -> Dict[str, Any]:
+        """Train one full epoch over the data_loader. Returns epoch metrics.
+        
+        Properly iterates all batches with gradient accumulation, handles
+        DDP sync correctly, and respects DistributedSampler epoch boundaries.
+        
+        Args:
+            step_callback: Optional callable(current_step, loss, lr) called after
+                each effective training step (optimizer update). Used by worker for
+                periodic logging, conductor polling, and checkpointing.
+        
+        Returns:
+            dict with 'total_steps' (steps in this epoch), 'avg_loss', 'final_lr'
+        """
         
         if self.data_loader is None:
             raise RuntimeError("Dataset not prepared. Call prepare() first.")
         
         self.model.train()
-        self.optimizer.zero_grad()
         
         accumulated_loss = 0.0
         samples_processed = 0
+        epoch_steps = 0
+        total_batches = len(self.data_loader)
         
-        for batch in self.data_loader:
+        for batch_idx, batch in enumerate(self.data_loader):
             # Move batch to device
             batch = {k: v.to(self.device) for k, v in batch.items()}
             
@@ -568,16 +584,23 @@ class KeplerTransformersBackend:
             
             # Backward pass (no sync on intermediate steps for DDP efficiency)
             if torch.distributed.is_initialized():
-                with self.model.no_sync() if samples_processed % self.grad_accum_steps != (self.grad_accum_steps - 1) else torch.enable_grad():
+                # Determine if this batch completes an accumulation group
+                batch_in_accum = samples_processed % self.grad_accum_steps
+                should_sync = (batch_in_accum + batch["input_ids"].shape[0]) >= self.grad_accum_steps
+                
+                if should_sync:
                     loss.backward()
+                else:
+                    with self.model.no_sync():
+                        loss.backward()
             else:
                 loss.backward()
             
             accumulated_loss += loss.item() * self.grad_accum_steps
             samples_processed += batch["input_ids"].shape[0]
             
-            # Gradient accumulation step
-            if samples_processed % self.grad_accum_steps == 0:
+            # Gradient accumulation step: optimizer update when enough samples processed
+            if samples_processed >= self.grad_accum_steps:
                 # Gradient clipping (important for stability)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 
@@ -585,24 +608,36 @@ class KeplerTransformersBackend:
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 self.step_count += 1
+                epoch_steps += 1
                 
-                # Return metrics after each effective step
                 current_lr = self.scheduler.get_last_lr()[0]
-                metrics = {
-                    "loss": accumulated_loss / samples_processed,
-                    "lr": current_lr,
-                    "step": self.step_count,
-                }
+                avg_loss = accumulated_loss / samples_processed
+                
+                # Step callback for worker (logging, conductor poll, checkpoint)
+                if step_callback is not None:
+                    try:
+                        step_callback(self.step_count, avg_loss, current_lr)
+                    except Exception as e:
+                        log(f"WARNING: step_callback error: {e}")
                 
                 # Clear cache periodically (Kepler VRAM management)
                 if self.step_count % 64 == 0:
                     gc.collect()
                     torch.cuda.empty_cache()
-                
-                return metrics
         
-        # Fallback: should not reach here if data_loader has data
-        return {"loss": accumulated_loss / max(samples_processed, 1), "lr": 0.0, "step": self.step_count}
+        # Return epoch summary metrics
+        avg_loss = accumulated_loss / max(samples_processed, 1)
+        final_lr = self.scheduler.get_last_lr()[0]
+        
+        log(f"Epoch complete: {total_batches} batches, {epoch_steps} steps, "
+            f"avg_loss={avg_loss:.4f}, total_steps={self.step_count}")
+        
+        return {
+            "total_steps": epoch_steps,
+            "avg_loss": avg_loss,
+            "final_lr": final_lr,
+            "samples": samples_processed,
+        }
     
     def save_checkpoint(self, step: int, path: str):
         """Save model checkpoint with optimizer and scheduler state for resume.

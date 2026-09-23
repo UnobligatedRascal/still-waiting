@@ -125,6 +125,7 @@ def run_job(job_id: str, job_config: Dict[str, Any]):
     target_steps = job_config.get("target_steps", 10000)
     config = job_config.get("config", {})
     current_step = job_config.get("current_step", 0)
+    num_train_epochs = config.get("num_train_epochs", 1)
     
     msg = f"Starting job {job_id}: {model_ref} -> {target_steps} steps"
     print(msg)
@@ -156,48 +157,83 @@ def run_job(job_id: str, job_config: Dict[str, Any]):
     except Exception as e:
         send_log(job_id, "WARN", f"Failed to signal RUNNING status: {e}")
     
-    # Training loop
-    while current_step < target_steps:
-        try:
-            # Train step
-            metrics = backend.train_step()
-            current_step += 1
-            
-            # Log periodic progress (every 16 steps to avoid spam)
-            if current_step % 16 == 0:
-                loss_val = metrics.get("loss", "N/A")
-                if isinstance(loss_val, (int, float)):
-                    loss_val = f"{loss_val:.4f}"
-                log_msg = f"Step {current_step}/{target_steps}, loss={loss_val}"
-                send_log(job_id, "INFO", log_msg, current_step)
-                # Also print to stdout for local visibility
-                if get_local_rank() == 0:
-                    print(log_msg, flush=True)
-            
-            # Check conductor
+    # Step callback for periodic logging, conductor polling, and checkpointing
+    def step_callback(step: int, loss: float, lr: float):
+        nonlocal current_step
+        current_step = step
+        
+        # Log periodic progress (every 16 steps)
+        if step % 16 == 0:
+            loss_val = f"{loss:.4f}"
+            log_msg = f"Step {step}/{target_steps}, loss={loss_val}, lr={lr:.2e}"
+            send_log(job_id, "INFO", log_msg, step)
+            if get_local_rank() == 0:
+                print(log_msg, flush=True)
+        
+        # Poll conductor every 64 steps
+        if step % 64 == 0:
             instruction = poll_conductor(job_id)
             if instruction == "pause":
                 msg = f"Job {job_id}: Paused by conductor"
                 print(msg)
                 send_log(job_id, "INFO", msg)
-                break
+                raise SystemExit(0)  # Clean exit on pause
             elif instruction and instruction != "pause":
                 msg = f"Job {job_id}: Conductor instruction: {instruction}"
                 print(msg)
                 send_log(job_id, "INFO", msg)
                 apply_edit(backend, job_id, instruction)
+        
+        # Checkpoint every CHECKPOINT_EVERY steps
+        if step % CHECKPOINT_EVERY == 0:
+            ckpt_path = f"{CHECKPOINT_DIR}/{job_id}/step_{step}"
+            os.makedirs(ckpt_path, exist_ok=True)
+            metrics = {"loss": float(loss), "lr": float(lr), "step": step}
+            backend.save_checkpoint(step, ckpt_path)
+            notify_orchestrator(job_id, step, ckpt_path, metrics)
+            send_log(job_id, "INFO", f"Checkpoint saved: step_{step} -> {ckpt_path}", step)
+    
+    # Training loop: iterate over epochs, each epoch processes full dataset
+    for epoch in range(num_train_epochs):
+        if current_step >= target_steps:
+            break
+        
+        try:
+            # Signal epoch start for DistributedSampler
+            if hasattr(backend.data_loader.sampler, "set_epoch"):
+                backend.data_loader.sampler.set_epoch(epoch)
             
-            # Checkpoint
-            if current_step % CHECKPOINT_EVERY == 0:
-                ckpt_path = f"{CHECKPOINT_DIR}/{job_id}/step_{current_step}"
-                os.makedirs(ckpt_path, exist_ok=True)
-                backend.save_checkpoint(current_step, ckpt_path)
-                notify_orchestrator(job_id, current_step, ckpt_path, metrics)
-                send_log(job_id, "INFO", f"Checkpoint saved: step_{current_step} -> {ckpt_path}", current_step)
+            # Train one full epoch with step callback
+            epoch_result = backend.train_epoch(step_callback=step_callback)
+            current_step = backend.step_count
             
+            # Log epoch summary
+            loss_val = epoch_result.get("avg_loss", "N/A")
+            if isinstance(loss_val, (int, float)):
+                loss_val = f"{loss_val:.4f}"
+            log_msg = f"Epoch {epoch+1}/{num_train_epochs} complete: {current_step}/{target_steps} steps, avg_loss={loss_val}"
+            send_log(job_id, "INFO", log_msg, current_step)
+            if get_local_rank() == 0:
+                print(log_msg, flush=True)
+            
+        except SystemExit:
+            # Clean exit from conductor pause
+            raise
         except Exception as e:
             fail_job(job_id, f"Training error at step {current_step}: {e}", current_step)
             raise
+    
+    # Final checkpoint if we reached target steps but didn't align with CHECKPOINT_EVERY
+    if current_step >= target_steps and current_step % CHECKPOINT_EVERY != 0:
+        try:
+            ckpt_path = f"{CHECKPOINT_DIR}/{job_id}/step_{current_step}"
+            os.makedirs(ckpt_path, exist_ok=True)
+            metrics = {"loss": 0.0, "lr": 0.0, "step": current_step}
+            backend.save_checkpoint(current_step, ckpt_path)
+            notify_orchestrator(job_id, current_step, ckpt_path, metrics)
+            send_log(job_id, "INFO", f"Final checkpoint saved: step_{current_step} -> {ckpt_path}", current_step)
+        except Exception as e:
+            send_log(job_id, "WARN", f"Failed to save final checkpoint: {e}", current_step)
     
     # Complete
     try:

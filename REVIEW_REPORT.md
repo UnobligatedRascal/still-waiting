@@ -332,6 +332,7 @@ Documented in AGENTS.md, but the deployment tooling has this silent failure mode
 | NF4 TODO | Stale TODO list in nf4_kepler.py | ✅ | Marked integration as done |
 | PERF-1 | NF4 quantization O(n×16) broadcast | ✅ | Replaced with O(n×4) searchsorted |
 | QC-2 | Unused imports in transformers_backend.py | ✅ | Removed math, random, Tuple |
+| BUG-1/BUG-4 | train_step() returns after first grad-accum boundary | ✅ | Renamed train_step() → train_epoch(), full epoch iteration, step_callback for monitoring, worker loops over epochs |
 
 ---
 
@@ -341,8 +342,8 @@ Documented in AGENTS.md, but the deployment tooling has this silent failure mode
 1. ✅ Fix worker.py syntax error
 2. ✅ Fix LossChart cache
 3. ✅ Fix target_modules string/list mismatch
-4. Fix train_step()/data_loader iteration logic (BUG-1, BUG-4)
-5. Add safetensors + optimizer state to checkpoints (DONE)
+4. ✅ Fix train_step()/data_loader iteration logic (BUG-1, BUG-4)
+5. ✅ Add safetensors + optimizer state to checkpoints
 6. Pre-compile NF4 extension or cache aggressively
 
 ### P1 (Before production use)
