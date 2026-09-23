@@ -15,6 +15,12 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# NCCL settings for Kepler (slow interconnect, be patient)
+os.environ["NCCL_IB_DISABLE"] = "1"  # Use PCIe/NVLink, not InfiniBand
+os.environ["NCCL_P2P_DISABLE"] = "1"  # K80 P2P is unreliable
+os.environ["NCCL_DEBUG"] = "WARN"  # Reduce noise; set INFO for debugging
+os.environ["NCCL_TIMEOUT"] = "600"  # 10 min timeout for large all-reduces on Kepler
+
 # Configuration
 CHECKPOINT_EVERY = int(os.getenv("CHECKPOINT_EVERY", "2048"))
 ORCH_URL = os.getenv("ORCH_URL", "http://localhost:9999")
@@ -130,6 +136,10 @@ def parse_log_line(line: str, current_step: int) -> tuple:
     
     return level, msg, step_hint
 
+def is_main_rank() -> bool:
+    """Check if this process is the main rank (rank 0) for DDP."""
+    return get_local_rank() == 0
+
 def run_job(job_id: str, job_config: Dict[str, Any]):
     """Run a training job. Called by worker pool or directly."""
     
@@ -138,15 +148,26 @@ def run_job(job_id: str, job_config: Dict[str, Any]):
     config = job_config.get("config", {})
     current_step = job_config.get("current_step", 0)
     num_train_epochs = config.get("num_train_epochs", 1)
+
+    # Pre-warm CUDA extension on this rank (avoids race condition across DDP ranks)
+    # Each rank compiles independently; do it before distributed init matters.
+    if torch.cuda.is_available():
+        try:
+            from kernels import nf4_cuda
+            nf4_cuda._ensure_extension()
+        except Exception:
+            pass  # Non-critical; will fail later if actually needed
     
-    msg = f"Starting job {job_id}: {model_ref} -> {target_steps} steps"
-    print(msg)
-    send_log(job_id, "INFO", msg)
+    msg = f"Starting job {job_id}: {model_ref} -> {target_steps} steps (rank={get_local_rank()}/{get_world_size()})"
+    print(msg, flush=True)
+    if is_main_rank():
+        send_log(job_id, "INFO", msg)
     
     # Initialize backend
     try:
         backend = KeplerTransformersBackend(config)
-        send_log(job_id, "INFO", f"Backend initialized: KeplerTransformersBackend")
+        if is_main_rank():
+            send_log(job_id, "INFO", "Backend initialized: KeplerTransformersBackend")
     except Exception as e:
         fail_job(job_id, f"Backend init failed: {e}")
         raise
@@ -154,50 +175,52 @@ def run_job(job_id: str, job_config: Dict[str, Any]):
     # Prepare model
     try:
         backend.prepare(model_ref, config)
-        send_log(job_id, "INFO", f"Model prepared: {model_ref}")
+        if is_main_rank():
+            send_log(job_id, "INFO", f"Model prepared: {model_ref}")
     except Exception as e:
         fail_job(job_id, f"Model prepare failed: {e}")
         raise
     
-    # Notify orchestrator we're running
-    try:
-        requests.post(
-            f"{ORCH_URL}/v1/training/jobs/{job_id}/resume",
-            timeout=10
-        )
-        send_log(job_id, "INFO", f"Job status changed to RUNNING")
-    except Exception as e:
-        send_log(job_id, "WARN", f"Failed to signal RUNNING status: {e}")
+    # Notify orchestrator we're running (main rank only)
+    if is_main_rank():
+        try:
+            requests.post(
+                f"{ORCH_URL}/v1/training/jobs/{job_id}/resume",
+                timeout=10
+            )
+            send_log(job_id, "INFO", "Job status changed to RUNNING")
+        except Exception as e:
+            send_log(job_id, "WARN", f"Failed to signal RUNNING status: {e}")
     
     # Step callback for periodic logging, conductor polling, and checkpointing
     def step_callback(step: int, loss: float, lr: float):
         nonlocal current_step
         current_step = step
         
-        # Log periodic progress (every 16 steps)
+        # Log periodic progress (every 16 steps, main rank only)
         if step % 16 == 0:
             loss_val = f"{loss:.4f}"
             log_msg = f"Step {step}/{target_steps}, loss={loss_val}, lr={lr:.2e}"
-            send_log(job_id, "INFO", log_msg, step)
-            if get_local_rank() == 0:
-                print(log_msg, flush=True)
+            print(log_msg, flush=True)
+            if is_main_rank():
+                send_log(job_id, "INFO", log_msg, step)
         
-        # Poll conductor every 64 steps
-        if step % 64 == 0:
+        # Poll conductor every 64 steps (main rank only)
+        if step % 64 == 0 and is_main_rank():
             instruction = poll_conductor(job_id)
             if instruction == "pause":
                 msg = f"Job {job_id}: Paused by conductor"
-                print(msg)
+                print(msg, flush=True)
                 send_log(job_id, "INFO", msg)
                 raise SystemExit(0)  # Clean exit on pause
             elif instruction and instruction != "pause":
                 msg = f"Job {job_id}: Conductor instruction: {instruction}"
-                print(msg)
+                print(msg, flush=True)
                 send_log(job_id, "INFO", msg)
                 apply_edit(backend, job_id, instruction)
         
-        # Checkpoint every CHECKPOINT_EVERY steps
-        if step % CHECKPOINT_EVERY == 0:
+        # Checkpoint every CHECKPOINT_EVERY steps (main rank only to avoid file corruption)
+        if step % CHECKPOINT_EVERY == 0 and is_main_rank():
             ckpt_path = f"{CHECKPOINT_DIR}/{job_id}/step_{step}"
             os.makedirs(ckpt_path, exist_ok=True)
             metrics = {"loss": float(loss), "lr": float(lr), "step": step}
@@ -219,14 +242,14 @@ def run_job(job_id: str, job_config: Dict[str, Any]):
             epoch_result = backend.train_epoch(step_callback=step_callback)
             current_step = backend.step_count
             
-            # Log epoch summary
+            # Log epoch summary (main rank only)
             loss_val = epoch_result.get("avg_loss", "N/A")
             if isinstance(loss_val, (int, float)):
                 loss_val = f"{loss_val:.4f}"
             log_msg = f"Epoch {epoch+1}/{num_train_epochs} complete: {current_step}/{target_steps} steps, avg_loss={loss_val}"
-            send_log(job_id, "INFO", log_msg, current_step)
-            if get_local_rank() == 0:
-                print(log_msg, flush=True)
+            print(log_msg, flush=True)
+            if is_main_rank():
+                send_log(job_id, "INFO", log_msg, current_step)
             
         except SystemExit:
             # Clean exit from conductor pause
@@ -235,31 +258,33 @@ def run_job(job_id: str, job_config: Dict[str, Any]):
             fail_job(job_id, f"Training error at step {current_step}: {e}", current_step)
             raise
     
-    # Final checkpoint if we reached target steps but didn't align with CHECKPOINT_EVERY
+    # Final checkpoint (main rank only)
     if current_step >= target_steps and current_step % CHECKPOINT_EVERY != 0:
-        try:
-            ckpt_path = f"{CHECKPOINT_DIR}/{job_id}/step_{current_step}"
-            os.makedirs(ckpt_path, exist_ok=True)
-            metrics = {"loss": 0.0, "lr": 0.0, "step": current_step}
-            backend.save_checkpoint(current_step, ckpt_path)
-            notify_orchestrator(job_id, current_step, ckpt_path, metrics)
-            send_log(job_id, "INFO", f"Final checkpoint saved: step_{current_step} -> {ckpt_path}", current_step)
-        except Exception as e:
-            send_log(job_id, "WARN", f"Failed to save final checkpoint: {e}", current_step)
+        if is_main_rank():
+            try:
+                ckpt_path = f"{CHECKPOINT_DIR}/{job_id}/step_{current_step}"
+                os.makedirs(ckpt_path, exist_ok=True)
+                metrics = {"loss": 0.0, "lr": 0.0, "step": current_step}
+                backend.save_checkpoint(current_step, ckpt_path)
+                notify_orchestrator(job_id, current_step, ckpt_path, metrics)
+                send_log(job_id, "INFO", f"Final checkpoint saved: step_{current_step} -> {ckpt_path}", current_step)
+            except Exception as e:
+                send_log(job_id, "WARN", f"Failed to save final checkpoint: {e}", current_step)
     
-    # Complete
-    try:
-        requests.post(
-            f"{ORCH_URL}/v1/training/jobs/{job_id}/complete",
-            timeout=10
-        )
-        msg = f"Job {job_id}: Completed at step {current_step}"
-        print(msg)
-        send_log(job_id, "INFO", msg)
-    except Exception as e:
-        msg = f"ERROR: Failed to mark job complete: {e}"
-        print(msg)
-        send_log(job_id, "ERROR", msg)
+    # Mark complete (main rank only)
+    if is_main_rank():
+        try:
+            requests.post(
+                f"{ORCH_URL}/v1/training/jobs/{job_id}/complete",
+                timeout=10
+            )
+            msg = f"Job {job_id}: Completed at step {current_step}"
+            print(msg, flush=True)
+            send_log(job_id, "INFO", msg)
+        except Exception as e:
+            msg = f"ERROR: Failed to mark job complete: {e}"
+            print(msg, flush=True)
+            send_log(job_id, "ERROR", msg)
 
 def apply_edit(backend, job_id: str, instruction: str):
     """Apply conductor instruction."""
@@ -298,7 +323,10 @@ def main():
         torch.distributed.init_process_group(backend="nccl")
     
     local_rank = get_local_rank()
-    send_log(job_id, "INFO", f"Worker started: LOCAL_RANK={local_rank}, WORLD_SIZE={get_world_size()}, NUMA={NUMA_NODE}")
+    world_size = get_world_size()
+    print(f"Worker started: LOCAL_RANK={local_rank}, WORLD_SIZE={world_size}, NUMA={NUMA_NODE}", flush=True)
+    if is_main_rank():
+        send_log(job_id, "INFO", f"Worker started: LOCAL_RANK={local_rank}, WORLD_SIZE={world_size}, NUMA={NUMA_NODE}")
 
     run_job(job_id, job_config)
 
