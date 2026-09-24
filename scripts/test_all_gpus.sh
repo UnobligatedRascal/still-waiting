@@ -15,13 +15,14 @@ set -euo pipefail
 
 # Configuration
 MODEL="${1:-Qwen/Qwen2.5-0.5B-Instruct}"
-STEPS="${2:-10}"
+STEPS="${2:-50}"
 NUM_GPUS=8
 LOG_DIR="/home/whistler/still-waiting/python/logs"
 CONFIG_DIR="/home/whistler/still-waiting/python/configs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/all_gpus_test_${TIMESTAMP}.log"
 CONFIG_FILE="${CONFIG_DIR}/test_all_gpus_${TIMESTAMP}.json"
+DATASET="wikitext/wikitext-2-raw-v1"
 
 # Colors for terminal output
 RED='\033[0;31m'
@@ -78,7 +79,8 @@ cat > "${CONFIG_FILE}" << EOF
     "model_ref": "${MODEL}",
     "target_steps": ${STEPS},
     "config": {
-        "model_precision": "f32",
+        "model_precision": "custom_nf4",
+        "dataset_path": "${DATASET}",
         "max_seq_length": 128,
         "lora_r": 8,
         "lora_alpha": 16,
@@ -94,6 +96,7 @@ EOF
 
 log "Test config written to: ${CONFIG_FILE}"
 log "Model: ${MODEL}"
+log "Dataset: ${DATASET}"
 log "Steps: ${STEPS}"
 log "GPUs: ${NUM_GPUS}"
 
