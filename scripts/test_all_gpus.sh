@@ -66,7 +66,7 @@ fi
 
 # Show GPU info
 log "GPU inventory:"
-nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv -L 2>/dev/null || nvidia-smi -L
+nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv 2>/dev/null || nvidia-smi -L
 
 # Create temp directories
 mkdir -p "${LOG_DIR}"
@@ -112,7 +112,7 @@ echo ""
 START_TIME=$(date +%s)
 
 torchrun --nproc_per_node=${NUM_GPUS} \
-    python3 /home/whistler/still-waiting/python/worker.py \
+    /home/whistler/still-waiting/python/worker.py \
     "test_all_gpus_${TIMESTAMP}" \
     "${CONFIG_FILE}" 2>&1 | tee "${LOG_FILE}"
 
