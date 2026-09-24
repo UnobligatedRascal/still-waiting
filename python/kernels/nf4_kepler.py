@@ -509,10 +509,12 @@ class NF4LoRALayer(nn.Module):
         # LoRA matrices: ΔW = B @ A
         # A: (r, in_features), random init
         # B: (out_features, r), zero init
+        # CRITICAL: must init on same device as base_layer (was a bug: created on CPU)
+        device = next(base_layer.buffers()).device
         self.lora_A = nn.Parameter(
-            torch.randn(r, base_layer.in_features) * (1 / base_layer.in_features)
+            torch.randn(r, base_layer.in_features, device=device) * (1 / base_layer.in_features)
         )
-        self.lora_B = nn.Parameter(torch.zeros(base_layer.out_features, r))
+        self.lora_B = nn.Parameter(torch.zeros(base_layer.out_features, r, device=device))
 
         # Optional dropout before LoRA
         self.dropout = nn.Dropout(dropout) if dropout > 0 else None
